@@ -118,6 +118,7 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
     var indexes = geojsonCover.bboxQueryIndexes(input);
     var q = queue(100);
     var dyno = this.dyno;
+    var query = +new Date();
     log('querying with ' + indexes.length + ' indexes');
     indexes.forEach(function(idx) {
         q.defer(
@@ -131,8 +132,17 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
     });
     q.awaitAll(function(err, res) {
         if (err) return callback(err);
+        query = (+new Date()) - query;
+        var start = +new Date();
+        var ret = {data: parseQueryResponse(res)};
 
-        callback(err, parseQueryResponse(res));
+        ret.bench = {
+            indexes:indexes.length,
+            parse: (+new Date()) - start,
+            query: query
+        };
+
+        callback(err, ret);
     });
 };
 
