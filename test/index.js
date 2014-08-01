@@ -7,8 +7,6 @@ var test = require('tap').test,
     fixtures = require('./fixtures'),
     AWS = require('aws-sdk');
 
-
-
 if(!fs.existsSync('../.env.test')) {
     console.log('AWSKey and AWSSecret must be set to run tests. You can do that .env.test');
     process.exit(1);

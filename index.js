@@ -10,7 +10,7 @@ var s2 = require('s2'),
     queue = require('queue-async'),
     AWS = require('aws-sdk');
 
-var coverOpts = {};
+var coverOpts = {}; 
 coverOpts.max_query_cells = 100;
 coverOpts.query_min_level = 5;
 coverOpts.query_max_level = 5;
@@ -18,6 +18,15 @@ coverOpts.max_index_cells = 100;
 coverOpts.index_min_level = 5;
 coverOpts.index_max_level = 5;
 coverOpts.index_point_level = 5;
+
+var coverOptsBig = {};
+coverOptsBig.max_query_cells = 100;
+coverOptsBig.query_min_level = 4;
+coverOptsBig.query_max_level = 4;
+coverOptsBig.max_index_cells = 100;
+coverOptsBig.index_min_level = 4;
+coverOptsBig.index_max_level = 4;
+coverOptsBig.index_point_level = 15;
 
 module.exports = Cardboard;
 
@@ -88,12 +97,6 @@ Cardboard.prototype.insert = function(primary, feature, layer, cb) {
     });
 };
 
-// Cardboard.prototype.createTable = function(tableName, callback) {
-//     var table = require('./lib/table.json');
-//     table.TableName = tableName;
-//     this.dyno.createTable(table, callback);
-// };
-
 Cardboard.prototype.bboxQuery = function(input, layer, callback) {
     var indexes = geojsonCover.bboxQueryIndexes(input, false, coverOpts);
     var q = queue(100);
@@ -148,38 +151,5 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
         callback(err, features);
     });
 };
-
-// Cardboard.prototype.dump = function(cb) {
-//     return this.dyno.scan(cb);
-// };
-//
-// Cardboard.prototype.dumpGeoJSON = function(callback) {
-//     return this.dyno.scan(function(err, res) {
-//         if (err) return callback(err);
-//         return callback(null, {
-//             type: 'FeatureCollection',
-//             features: res.items.map(function(f) {
-//                 return {
-//                     type: 'Feature',
-//                     properties: {
-//                         key: f.key
-//                     },
-//                     geometry: new s2.S2Cell(new s2.S2CellId()
-//                         .fromToken(
-//                             f.key.split('!')[1])).toGeoJSON()
-//                 };
-//             })
-//         });
-//     });
-// };
-//
-// Cardboard.prototype.export = function(_) {
-//     return this.dyno.scan()
-//         .pipe(through({ objectMode: true }, function(data, enc, cb) {
-//              this.push(geobuf.geobufToFeature(data.val));
-//              cb();
-//         }))
-//         .pipe(geojsonStream.stringify());
-// };
 
 Cardboard.prototype.geojsonCover = geojsonCover;
