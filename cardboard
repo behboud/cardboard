@@ -22,8 +22,8 @@ var tableName = argv._[0];
 console.log('endpoint', process.env.Endpoint)
 
 var config = {
-    awsKey: process.env.AWSKey || 'fake',
-    awsSecret:  process.env.AWSSecret || 'fake',
+    awsKey: process.env.AWSKey,
+    awsSecret:  process.env.AWSSecret,
     table: tableName,
     endpoint:  process.env.Endpoint,
     region: process.env.Region
