@@ -27,7 +27,7 @@ function Cardboard(c) {
 Cardboard.prototype.insert = function(primary, feature, layer, cb) {
     var indexes = geojsonCover.geometryIndexes(feature.geometry);
     var dyno = this.dyno;
-    var q = queue(50);
+    var q = queue(5);
     var buf = geobuf.featureToGeobuf(feature).toBuffer();
 
     indexes.forEach(writeIndex);
