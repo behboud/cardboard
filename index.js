@@ -8,6 +8,9 @@ var s2 = require('s2'),
     geobuf = require('geobuf'),
     log = require('debug')('cardboard'),
     queue = require('queue-async'),
+    extent = require('turf-extent'),
+    distance = require('turf-distance'),
+    point = require('turf-point'),
     AWS = require('aws-sdk');
 
 var coverOpts = {}; 
@@ -48,6 +51,7 @@ function Cardboard(c) {
 }
 
 Cardboard.prototype.insert = function(primary, feature, layer, cb) {
+    isBig(feature)
     var indexes = geojsonCover.geometryIndexes(feature.geometry, coverOpts);
     var s3 = this.s3;
     var bucket = this.bucket;
@@ -153,3 +157,14 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
 };
 
 Cardboard.prototype.geojsonCover = geojsonCover;
+
+function isBig(feature) {
+    var bbox = extent(feature);
+    log('bbox %\s',bbox)
+
+    var sw = point(bbox[0], bbox[1]);
+    var ne = point(bbox[2], bbox[3]);
+    var dist = distance(sw, ne, 'miles');
+
+    return dist >= 100;
+}
