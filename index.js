@@ -160,11 +160,8 @@ Cardboard.prototype.geojsonCover = geojsonCover;
 
 function isBig(feature) {
     var bbox = extent(feature);
-    log('bbox %\s',bbox)
-
     var sw = point(bbox[0], bbox[1]);
     var ne = point(bbox[2], bbox[3]);
     var dist = distance(sw, ne, 'miles');
-
     return dist >= 100;
 }
