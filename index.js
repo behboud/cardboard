@@ -51,8 +51,12 @@ function Cardboard(c) {
 }
 
 Cardboard.prototype.insert = function(primary, feature, layer, cb) {
-    isBig(feature)
-    var indexes = geojsonCover.geometryIndexes(feature.geometry, coverOpts);
+    if(isBig(feature)){
+        var indexes = geojsonCover.geometryIndexes(feature.geometry, coverOptsBig);
+    }
+    else{
+        var indexes = geojsonCover.geometryIndexes(feature.geometry, coverOpts);
+    }
     var s3 = this.s3;
     var bucket = this.bucket;
     var prefix = this.prefix;
