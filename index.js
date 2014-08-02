@@ -4,6 +4,7 @@ var s2 = require('s2'),
     geojsonStream = require('geojson-stream'),
     concat = require('concat-stream'),
     geojsonCover = require('geojson-cover'),
+    coverOpts = require('./lib/coveropts'),
     uniq = require('uniq'),
     geobuf = require('geobuf'),
     log = require('debug')('cardboard'),
@@ -22,10 +23,11 @@ module.exports = Cardboard;
 function Cardboard(c) {
     if (!(this instanceof Cardboard)) return new Cardboard(c);
     this.dyno = Dyno(c);
+    coverOpts = c.coverOpts || coverOpts;
 }
 
 Cardboard.prototype.insert = function(primary, feature, layer, cb) {
-    var indexes = geojsonCover.geometryIndexes(feature.geometry);
+    var indexes = geojsonCover.geometryIndexes(feature.geometry, coverOpts);
     var dyno = this.dyno;
     var q = queue(1);
     var buf = geobuf.featureToGeobuf(feature).toBuffer();
@@ -44,7 +46,8 @@ Cardboard.prototype.insert = function(primary, feature, layer, cb) {
                 id: id + '!' + part,
                 layer: layer,
                 val: buf.slice(start, start + chunkBytes)
-            });
+            },
+            {errors:{throughput:10}});
             start += chunkBytes;
             part++;
         }
@@ -71,7 +74,7 @@ Cardboard.prototype.del = function(primary, layer, callback) {
     var dyno = this.dyno;
     this.get(primary, layer, function(err, res) {
         if (err) return callback(err);
-        var indexes = geojsonCover.geometryIndexes(res[0].val.geometry);
+        var indexes = geojsonCover.geometryIndexes(res[0].val.geometry, coverOpts);
         var params = {
             RequestItems: {}
         };
@@ -115,7 +118,7 @@ Cardboard.prototype.get = function(primary, layer, callback) {
 };
 
 Cardboard.prototype.bboxQuery = function(input, layer, callback) {
-    var indexes = geojsonCover.bboxQueryIndexes(input);
+    var indexes = geojsonCover.bboxQueryIndexes(input, true, coverOpts);
     var q = queue(100);
     var dyno = this.dyno;
     var query = +new Date();
