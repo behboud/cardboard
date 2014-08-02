@@ -29,6 +29,8 @@ var config = {
     region: process.env.Region
 };
 
+config.coverOpts ={};
+
 config.coverOpts.max_query_cells = process.env.MAX_QUERY_CELLS || 100;
 config.coverOpts.query_min_level = process.env.QUERY_MIN_LEVEL || 1;
 config.coverOpts.query_max_level = process.env.QUERY_MAX_LEVEL || 5;
