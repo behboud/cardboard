@@ -9,7 +9,8 @@ var s2 = require('s2'),
     geobuf = require('geobuf'),
     log = require('debug')('cardboard'),
     queue = require('queue-async'),
-    Dyno = require('dyno');
+    Dyno = require('dyno'),
+    AWS = require('aws-sdk');
 
 var MAX_ENTRY_BYTES = 64 * 1000; // 64KB
 
@@ -23,42 +24,46 @@ module.exports = Cardboard;
 function Cardboard(c) {
     if (!(this instanceof Cardboard)) return new Cardboard(c);
     this.dyno = Dyno(c);
+
+    AWS.config.update({
+        accessKeyId: c.awsKey,
+        secretAccessKey: c.awsSecret,
+        region: c.region || 'us-east-1',
+    });
+    if(c.s3) console.log('fake s3');
+
+    this.s3 = c.s3 || new AWS.S3();
+    this.bucket = c.bucket;
+    this.prefix = c.prefix;
     coverOpts = c.coverOpts || coverOpts;
 }
 
 Cardboard.prototype.insert = function(primary, feature, layer, cb) {
     var indexes = geojsonCover.geometryIndexes(feature.geometry, coverOpts);
     var dyno = this.dyno;
+    var s3 = this.s3;
+
     var q = queue(1);
     var buf = geobuf.featureToGeobuf(feature).toBuffer();
 
-    indexes.forEach(writeIndex);
-    writeIndex(null);
+    // decide to save val with the item based on buf size.
+    console.log('insert', indexes.length, primary, buf.length);
 
+    indexes.forEach(writeIndex);
     function writeIndex(index) {
-        var id = (index === null) ?
-            ('id!' + primary) :
-            ('cell!' + index + '!' + primary);
-        var chunks = [], part = 0;
-        var chunkBytes = MAX_ENTRY_BYTES - id.length;
-        for (var start = 0; start < buf.length;) {
-            q.defer(dyno.putItem, {
-                id: id + '!' + part,
-                layer: layer,
-                val: buf.slice(start, start + chunkBytes)
-            },
-            {errors:{throughput:10}});
-            start += chunkBytes;
-            part++;
-        }
-        if (part > 1) {
-            log('length: ' + buf.length + ', chunks: ' + part + ', chunkBytes: ' + chunkBytes);
-        }
-        if (part === 0) {
-            log('part of 0!');
-        }
+        var id = 'cell!' + index + '!' + primary;
+        q.defer(dyno.putItem, {
+            id: id,
+            layer: layer,
+            geometryid: primary
+        }, {errors:{throughput:10}});
     }
 
+    q.defer(s3.putObject, {
+        Key: [this.prefix, layer, primary].join('/'),
+        Bucket: this.bucket,
+        Body: buf
+    })
     q.awaitAll(function(err, res) {
         cb(err);
     });
@@ -106,16 +111,35 @@ function partsRequired(feature) {
     return Math.ceil(buf.length / MAX_ENTRY_BYTES);
 }
 
-Cardboard.prototype.get = function(primary, layer, callback) {
-    var dyno = this.dyno;
-    dyno.query({
-        id: { 'BEGINS_WITH': 'id!' + primary },
-        layer: { 'EQ': layer }
-    }, { pages: 0 }, function(err, res) {
-        if (err) return callback(err);
-        callback(err, parseQueryResponse([res]));
+// Cardboard.prototype.get = function(primary, layer, callback) {
+//     var dyno = this.dyno;
+//     dyno.query({
+//         id: { 'BEGINS_WITH': 'id!' + primary },
+//         layer: { 'EQ': layer }
+//     }, { pages: 0 }, function(err, res) {
+//         console.error(err, res);
+//         if (err) return callback(err);
+//         callback(err, parseQueryResponse([res]));
+//     });
+// };
+
+Cardboard.prototype.getFeatures = function(layer, features, callback) {
+    var s3 = this.s3;
+    var bucket = this.bucket;
+    var prefix = this.prefix;
+    var q = queue(100);
+    features.forEach(fetch);
+    function fetch(f){
+        var key = [prefix,layer,f.geometryid].join('/');
+        q.defer(s3.getObject, {
+            Key: key,
+            Bucket: bucket
+        });
+    }
+    q.awaitAll(function(err, data){
+        callback(err, data);
     });
-};
+}
 
 Cardboard.prototype.bboxQuery = function(input, layer, callback) {
     var indexes = geojsonCover.bboxQueryIndexes(input, true, coverOpts);
@@ -136,54 +160,49 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
     q.awaitAll(function(err, res) {
         if (err) return callback(err);
         query = (+new Date()) - query;
-        var start = +new Date();
-        var ret = {data: parseQueryResponse(res)};
 
-        ret.bench = {
-            indexes:indexes.length,
-            parse: (+new Date()) - start,
-            query: query
-        };
+        var res = parseQueryResponse(res);
 
-        callback(err, ret);
-    });
+        var startfetch = + new Date();
+        this.getFeatures(layer, res, featuresResp);
+        function featuresResp(err, data){
+            var gotfeatures = +new Date();
+            res = data.map(function(i) {
+                i.val = geobuf.geobufToFeature(i.Body);
+                return i;
+            });
+
+            var ret = {
+                data: res,
+                bench:{
+                    indexes:indexes.length,
+                    parse: (+ new Date()) - gotfeatures,
+                    fetch: gotfeatures - startfetch,
+                    query: query
+                }
+            };
+            callback(err, ret);
+        }
+    }.bind(this));
 };
 
 function parseQueryResponse(res) {
+
     res = res.map(function(r) {
-        return r.items.map(function(i) {
-            i.id_parts = i.id.split('!');
-            return i;
-        });
+        return r.items;
     });
 
     var flat = _(res).chain().flatten().sortBy(function(a) {
-        return a.id_parts[2];
+        return a.id;
     }).value();
 
     flat = uniq(flat, function(a, b) {
-        return a.id_parts[2] !== b.id_parts[2] ||
-            a.id_parts[3] !== b.id_parts[3];
+        return a.geometryid !== b.geometryid
     }, true);
-
-    flat = _.groupBy(flat, function(_) {
-        return _.id_parts[2];
-    });
 
     flat = _.values(flat);
 
-    flat = flat.map(function(_) {
-        var concatted = Buffer.concat(_.map(function(i) {
-            return i.val;
-        }));
-        _[0].val = concatted;
-        return _[0];
-    });
-
-    return flat.map(function(i) {
-        i.val = geobuf.geobufToFeature(i.val);
-        return i;
-    });
+    return flat;
 }
 
 Cardboard.prototype.dump = function(cb) {
