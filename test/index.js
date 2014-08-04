@@ -173,9 +173,9 @@ test('insert & query', function(t) {
         var q = queue(1);
         queries.forEach(function(query) {
             q.defer(function(query, callback) {
-                t.equal(cardboard.bboxQuery(query.query, 'default', function(err, data) {
+                t.equal(cardboard.bboxQuery(query.query, 'default', function(err, resp) {
                     t.equal(err, null, 'no error for ' + query.query.join(','));
-                    t.equal(data.length, query.length, 'finds ' + query.length + ' data with a query');
+                    t.equal(resp.data.length, query.length, 'finds ' + query.length + ' data with a query');
                     callback();
                 }), undefined, '.bboxQuery');
             }, query);
@@ -207,9 +207,9 @@ test('insert polygon', function(t) {
         var q = queue(1);
         queries.forEach(function(query) {
             q.defer(function(query, callback) {
-                t.equal(cardboard.bboxQuery(query.query, 'default', function(err, data) {
+                t.equal(cardboard.bboxQuery(query.query, 'default', function(err, resp) {
                     t.equal(err, null, 'no error for ' + query.query.join(','));
-                    t.equal(data.length, query.length, 'finds ' + query.length + ' data with a query');
+                    t.equal(resp.data.length, query.length, 'finds ' + query.length + ' data with a query');
                     callback();
                 }), undefined, '.bboxQuery');
             }, query);
@@ -239,9 +239,9 @@ test('insert linestring', function(t) {
         var q = queue(1);
         queries.forEach(function(query) {
             q.defer(function(query, callback) {
-                t.equal(cardboard.bboxQuery(query.query, 'default', function(err, data) {
+                t.equal(cardboard.bboxQuery(query.query, 'default', function(err, resp) {
                     t.equal(err, null, 'no error for ' + query.query.join(','));
-                    t.equal(data.length, query.length, 'finds ' + query.length + ' data with a query');
+                    t.equal(resp.data.length, query.length, 'finds ' + query.length + ' data with a query');
                     callback();
                 }), undefined, '.bboxQuery');
             }, query);
@@ -277,9 +277,9 @@ test('insert idaho', function(t) {
         var q = queue(1);
         queries.forEach(function(query) {
             q.defer(function(query, callback) {
-                t.equal(cardboard.bboxQuery(query.query, 'default', function(err, data) {
+                t.equal(cardboard.bboxQuery(query.query, 'default', function(err, resp) {
                     t.equal(err, null, 'no error for ' + query.query.join(','));
-                    t.equal(data.length, query.length, 'finds ' + query.length + ' data with a query');
+                    t.equal(resp.data.length, query.length, 'finds ' + query.length + ' data with a query');
                     callback();
                 }), undefined, '.bboxQuery');
             }, query);
