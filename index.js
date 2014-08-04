@@ -14,6 +14,8 @@ var s2 = require('s2'),
 
 var MAX_ENTRY_BYTES = 64 * 1000; // 64KB
 
+var MAX_GEOMETRY_SIZE = 1024*10;  //10KB
+
 var emptyFeatureCollection = {
     type: 'FeatureCollection',
     features: []
@@ -30,7 +32,6 @@ function Cardboard(c) {
         secretAccessKey: c.awsSecret,
         region: c.region || 'us-east-1',
     });
-    if(c.s3) console.log('fake s3');
 
     this.s3 = c.s3 || new AWS.S3();
     this.bucket = c.bucket;
@@ -46,17 +47,21 @@ Cardboard.prototype.insert = function(primary, feature, layer, cb) {
     var q = queue(1);
     var buf = geobuf.featureToGeobuf(feature).toBuffer();
 
-    // decide to save val with the item based on buf size.
-    console.log('insert', indexes.length, primary, buf.length);
-
     indexes.forEach(writeIndex);
     function writeIndex(index) {
         var id = 'cell!' + index + '!' + primary;
-        q.defer(dyno.putItem, {
+
+        var item = {
             id: id,
             layer: layer,
             geometryid: primary
-        }, {errors:{throughput:10}});
+        };
+
+        if(buf.length < MAX_GEOMETRY_SIZE){
+            item.val = buf;
+        }
+
+        q.defer(dyno.putItem, item, {errors:{throughput:10}});
     }
 
     q.defer(s3.putObject, {
@@ -128,15 +133,22 @@ Cardboard.prototype.getFeatures = function(layer, features, callback) {
     var bucket = this.bucket;
     var prefix = this.prefix;
     var q = queue(100);
-    features.forEach(fetch);
-    function fetch(f){
+    features.forEach(function(f) {
+        q.defer(fetch, f);
+    });
+    function fetch(f, cb) {
         var key = [prefix,layer,f.geometryid].join('/');
-        q.defer(s3.getObject, {
+        if(f.val) {
+            return cb(null, { geometryid: f.geometryid, val: f.val });
+        }
+        s3.getObject({
             Key: key,
             Bucket: bucket
+        }, function(err, data) {
+            cb(err, { geometryid:f.geometryid, val:data.Body });
         });
     }
-    q.awaitAll(function(err, data){
+    q.awaitAll(function(err, data) {
         callback(err, data);
     });
 }
@@ -167,10 +179,14 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
         this.getFeatures(layer, res, featuresResp);
         function featuresResp(err, data){
             var gotfeatures = +new Date();
-            res = data.map(function(i) {
-                i.val = geobuf.geobufToFeature(i.Body);
+            data = data.map(function(i) {
+                i.val = geobuf.geobufToFeature(i.val);
                 return i;
             });
+            res.forEach(function(i){
+                i.val =  _(data).findWhere({geometryid: i.geometryid}).val;
+            })
+
 
             var ret = {
                 data: res,
