@@ -103,16 +103,16 @@ function partsRequired(feature) {
 }
 
 Cardboard.prototype.get = function(primary, layer, callback) {
-    var dyno = this.dyno;
-    dyno.query({
+    this.dyno.query({
         id: { 'BEGINS_WITH': 'id!' + primary },
         layer: { 'EQ': layer }
     }, { pages: 0 }, function(err, res) {
         if (err) return callback(err);
-        var ids = responseIds([res]);
-        this.getIds(ids, layer, function(res) {
-            callback(err, res);
-        });
+        return callback(null, parseFeatures(res));
+        // var ids = responseIds([res]);
+        // this.getIds(ids, layer, function(err, res) {
+        //     callback(err, res);
+        // });
     }.bind(this));
 };
 
@@ -120,11 +120,11 @@ Cardboard.prototype.getIds = function(ids, layer, callback) {
     var dyno = this.dyno;
     dyno.query({
         id: {
-            'EQ': [
-                ids.map(function(i) {
+            'EQ': {
+                SS: ids.map(function(i) {
                     return 'id!' + i + '!0';
                 })
-            ]
+            }
         },
         layer: { 'EQ': layer }
     }, function(err, res) {
@@ -149,8 +149,8 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
     });
     q.awaitAll(function(err, res) {
         if (err) return callback(err);
-        callback(err, parseQueryResponse(res));
-    });
+        this.getIds(responseIds(res), layer, callback);
+    }.bind(this));
 };
 
 function responseIds(res) {
@@ -168,14 +168,8 @@ function responseIds(res) {
 
 function parseFeatures(res) {
     return res.items.map(function(_) {
-        var concatted = Buffer.concat(_.map(function(i) {
-            return i.val;
-        }));
-        _[0].val = concatted;
-        return _[0];
-    }).map(function(i) {
-        i.val = geobuf.geobufToFeature(i.val);
-        return i;
+        _.val = geobuf.geobufToFeature(_.val);
+        return _;
     });
 }
 
