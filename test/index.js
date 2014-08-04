@@ -182,6 +182,7 @@ test('insert & query', function(t) {
     insertQueue.awaitAll(inserted);
 
     function inserted() {
+        t.pass('all inserted');
         var q = queue(1);
         queries.forEach(function(query) {
             q.defer(function(query, callback) {
