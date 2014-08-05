@@ -132,7 +132,7 @@ Cardboard.prototype.getFeatures = function(layer, features, callback) {
     var s3 = this.s3;
     var bucket = this.bucket;
     var prefix = this.prefix;
-    var q = queue(100);
+    var q = queue(1000);
     features.forEach(function(f) {
         q.defer(fetch, f);
     });
@@ -158,7 +158,7 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
     var q = queue(100);
     var dyno = this.dyno;
     var query = +new Date();
-    log('querying with ' + indexes.length + ' indexes');
+    log('querying with ' + indexes.length);
     indexes.forEach(function(idx) {
         q.defer(
             dyno.query,
@@ -208,7 +208,7 @@ function parseQueryResponse(res) {
     });
 
     var flat = _(res).chain().flatten().sortBy(function(a) {
-        return a.id;
+        return a.geometryid;
     }).value();
 
     flat = uniq(flat, function(a, b) {
