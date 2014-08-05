@@ -26,7 +26,9 @@ var config = {
     awsSecret:  process.env.AWSSecret,
     table: tableName,
     endpoint:  process.env.Endpoint,
-    region: process.env.Region
+    region: process.env.Region,
+    bucket: process.env.Bucket || 'mapbox-s2',
+    prefix: tableName
 };
 
 config.coverOpts ={};

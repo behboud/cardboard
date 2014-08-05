@@ -43,8 +43,8 @@ Cardboard.prototype.insert = function(primary, feature, layer, cb) {
     var indexes = geojsonCover.geometryIndexes(feature.geometry, coverOpts);
     var dyno = this.dyno;
     var s3 = this.s3;
-
-    var q = queue(1);
+    log(primary, layer, 'indexes:', indexes.length);
+    var q = queue(50);
     var buf = geobuf.featureToGeobuf(feature).toBuffer();
 
     indexes.forEach(writeIndex);
@@ -64,7 +64,7 @@ Cardboard.prototype.insert = function(primary, feature, layer, cb) {
         q.defer(dyno.putItem, item, {errors:{throughput:10}});
     }
 
-    q.defer(s3.putObject, {
+    q.defer(s3.putObject.bind(s3), {
         Key: [this.prefix, layer, primary].join('/'),
         Bucket: this.bucket,
         Body: buf
@@ -185,8 +185,7 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
             });
             res.forEach(function(i){
                 i.val =  _(data).findWhere({geometryid: i.geometryid}).val;
-            })
-
+            });
 
             var ret = {
                 data: res,
