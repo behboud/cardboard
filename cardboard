@@ -38,9 +38,11 @@ function ready() {
                 var id = (((feature.id !== undefined) ?
                     feature.id : feature.properties.id))
                     id = hat();
-                cardboard.insert(id, feature, argv.layer || 'default', function(err){
-                    if(err) throw err;
-                });
+                cardboard.insert(id, feature, argv.layer || 'default');
+            });
+            cardboard.finishInsert(argv.layer || 'default', function(err, resp){
+                if(err) return console.error(err);
+                console.log('inserted');
             });
         }));
         return;

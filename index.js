@@ -28,7 +28,6 @@ function Cardboard(c) {
         accessKeyId: c.awsKey,
         secretAccessKey: c.awsSecret,
         region: c.region || 'us-east-1',
-
     });
     if(c.coverOpts) {
         coverOpts = c.coverOpts
@@ -37,56 +36,41 @@ function Cardboard(c) {
     this.prefix = c.prefix || 'dev';
     this.s3 = new AWS.S3();
 }
+var cells = {};
 
-Cardboard.prototype.insert = function(primary, feature, layer, cb) {
+Cardboard.prototype.insert = function(primary, feature, layer) {
     var indexes = geojsonCover.geometryIndexes(feature.geometry, coverOpts);
-    var s3 = this.s3;
-    var bucket = this.bucket;
-    var prefix = this.prefix;
     if(!feature.properties) feature.properties = {};
     feature.properties.id = primary;
     log('indexing ' + primary + ' with ' + indexes.length + ' indexes');
-    var q = queue(1);
 
-    function updateCell(key, feature, cb) {
-        s3.getObject({Key:key, Bucket: bucket}, getObjectResp);
-        function getObjectResp(err, data) {
-            if (err && err.code !== 'NoSuchKey') {
-                console.log('Error Read', err);
-                throw err;
-            }
-            var fc;
-            if (data && data.Body) {
-                fc = geobuf.geobufToFeatureCollection(data.Body);
-                fc.features.push(feature);
-
-            } else {
-                fc = {type:'FeatureCollection', features:[feature]};
-            }
-            s3.putObject(
-                {
-                    Key:key,
-                    Bucket:bucket,
-                    Body: geobuf.featureCollectionToGeobuf(fc).toBuffer()
-                },
-                putObjectResp);
-
-        }
-        function putObjectResp(err, data) {
-            if(err) console.log(err)
-            cb(err, data)
+    indexes.forEach(updateCell);
+    function updateCell(index) {
+        if(cells[index]) {
+            cells[index].features.push(feature);
+        } else {
+            cells[index] = {type:'FeatureCollection', features:[feature]};
         }
     }
-
-
-    indexes.forEach(function(index) {
-        var key =  [prefix, layer, 'cell', index].join('/');
-        q.defer(updateCell, key, feature);
-    });
-    q.awaitAll(function(err, res) {
-        cb(err);
-    });
 };
+
+Cardboard.prototype.finishInsert = function(layer, callback) {
+    var q = queue(10);
+    var s3 = this.s3;
+    var bucket = this.bucket;
+    var prefix = this.prefix;
+
+    _(cells).each(function(val, key){
+        var key = [prefix, layer, 'cell', key].join('/');
+        q.defer(s3.putObject.bind(s3),{
+            Key: key,
+            Bucket: bucket,
+            Body: geobuf.featureCollectionToGeobuf(val).toBuffer()
+        });
+    });
+    q.awaitAll(callback);
+};
+
 
 // Cardboard.prototype.createTable = function(tableName, callback) {
 //     var table = require('./lib/table.json');
@@ -101,7 +85,7 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
     var prefix = this.prefix;
     var bucket = this.bucket;
     log('querying with ' + indexes.length + ' indexes');
-    console.time('query');
+    var bench = {query: +new Date()};
     indexes.forEach(function(idx) {
 
          function getCell(k, cb) {
@@ -120,9 +104,9 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
         q.defer(getCell, key);
     });
     q.awaitAll(function(err, res) {
-        console.timeEnd('query');
+        bench.query = (+new Date()) - bench.query;
         if (err) return callback(err);
-        console.time('parse');
+        bench.parse = +new Date();
 
 
         var features = [];
@@ -140,12 +124,12 @@ Cardboard.prototype.bboxQuery = function(input, layer, callback) {
         features = uniq(features, function(a, b) {
             return a.properties.id !== b.properties.id;
         }, true);
-        console.timeEnd('parse');
+        bench.parse = (+new Date()) - bench.parse;
 
         features= features.map(function(f){
             return {val:f};
         })
-        callback(err, features);
+        callback(err, {bench:bench, data:features});
     });
 };
 
