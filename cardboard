@@ -7,8 +7,7 @@ var fs = require('fs'),
     queue = require('queue-async'),
     geojsonNormalize = require('geojson-normalize'),
     JSONStream = require('JSONStream'),
-    argv = require('minimist')(process.argv.slice(2)),
-    dyno = require('dyno');
+    argv = require('minimist')(process.argv.slice(2));
 
 require('dotenv').load();
 
@@ -23,22 +22,22 @@ var config = {
     awsKey: process.env.AWSKey || 'fake',
     awsSecret:  process.env.AWSSecret || 'fake',
     table: tableName,
-    endpoint:  process.env.Endpoint || 'http://localhost:4567',
     region: process.env.Region
 };
 
+config.coverOpts ={};
+
+config.coverOpts.max_query_cells = process.env.MAX_QUERY_CELLS || 100;
+config.coverOpts.query_min_level = process.env.QUERY_MIN_LEVEL || 1;
+config.coverOpts.query_max_level = process.env.QUERY_MAX_LEVEL || 5;
+config.coverOpts.max_index_cells = process.env.MAX_INDEX_CELLS || 100;
+config.coverOpts.index_min_level = process.env.INDEX_MIN_LEVEL || 5;
+config.coverOpts.index_max_level = process.env.INDEX_MAX_LEVEL || 8;
+config.coverOpts.index_point_level = process.env.INDEX_POINT_LEVEL || 15;
+
 var cardboard = new Cardboard(config);
 
-cardboard.createTable(tableName, function(err){
-    if (err) {
-        console.error(err);
-        throw err;
-    }
-
-    console.error('your table is ready', tableName);
-    ready();
-});
-
+ready();
 function ready() {
     if (!process.stdin.isTTY) {
         process.stdin.pipe(concat(function(buf) {

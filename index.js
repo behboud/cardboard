@@ -8,181 +8,196 @@ var s2 = require('s2'),
     geobuf = require('geobuf'),
     log = require('debug')('cardboard'),
     queue = require('queue-async'),
-    Dyno = require('dyno');
+    level = require('level'),
+    coverOpts = require('./lib/coveropts');
 
-var MAX_ENTRY_BYTES = 64 * 1000; // 64KB
-
-var emptyFeatureCollection = {
-    type: 'FeatureCollection',
-    features: []
-};
+var db;
 
 module.exports = Cardboard;
 
 function Cardboard(c) {
     if (!(this instanceof Cardboard)) return new Cardboard(c);
-    this.dyno = Dyno(c);
+    db = level(c.db || './db', {valueEncoding: 'binary'});
+    this.coverOpts = c.coverOpts || coverOpts;
 }
 
-Cardboard.prototype.insert = function(primary, feature, layer, cb) {
-    var indexes = geojsonCover.geometryIndexes(feature.geometry);
-    var dyno = this.dyno;
-    var q = queue(50);
+Cardboard.prototype.insert = function(primary, feature, layer, callback) {
+    var indexes = geojsonCover.geometryIndexes(feature.geometry, this.coverOpts);
     var buf = geobuf.featureToGeobuf(feature).toBuffer();
+    var puts = [];
 
     indexes.forEach(writeIndex);
-    writeIndex(null);
-
     function writeIndex(index) {
-        var id = (index === null) ?
-            ('id!' + primary) :
-            ('cell!' + index + '!' + primary);
-        var chunks = [], part = 0;
-        var chunkBytes = MAX_ENTRY_BYTES - id.length;
-        for (var start = 0; start < buf.length;) {
-            q.defer(dyno.putItem, {
-                id: id + '!' + part,
-                layer: layer,
-                val: buf.slice(start, start + chunkBytes)
-            });
-            start += chunkBytes;
-            part++;
-        }
-        if (part > 1) {
-            log('length: ' + buf.length + ', chunks: ' + part + ', chunkBytes: ' + chunkBytes);
-        }
-        if (part === 0) {
-            log('part of 0!');
-        }
-    }
-
-    q.awaitAll(function(err, res) {
-        cb(err);
-    });
-};
-
-Cardboard.prototype.createTable = function(tableName, callback) {
-    var table = require('./lib/table.json');
-    table.TableName = tableName;
-    this.dyno.createTable(table, callback);
-};
-
-Cardboard.prototype.del = function(primary, layer, callback) {
-    var dyno = this.dyno;
-    this.get(primary, layer, function(err, res) {
-        if (err) return callback(err);
-        var indexes = geojsonCover.geometryIndexes(res[0].val.geometry);
-        var params = {
-            RequestItems: {}
-        };
-        function deleteId(id) {
-            return {
-                DeleteRequest: {
-                    Key: { id: { S: id }, layer: { S: layer } }
-                }
-            };
-        }
-        // TODO: how to get table name properly here.
-        params.RequestItems.geo = [
-            deleteId('id!' + primary + '!0')
-        ];
-        var parts = partsRequired(res[0].val);
-        for (var i = 0; i < indexes.length; i++) {
-            for (var j = 0; j < parts; j++) {
-                params.RequestItems.geo.push(deleteId('cell!' + indexes[i] + '!' + primary + '!' + j));
-            }
-        }
-        dyno.batchWriteItem(params, function(err, res) {
-            callback(null);
+        puts.push({
+            type: 'put',
+            key: ['cell', index, primary].join('!'),
+            value: 0
         });
+    }
+    puts.push({
+        type: 'put',
+        key: ['id', primary].join('!'),
+        value: buf
     });
+
+    var q  = queue();
+    q.defer(db.batch.bind(db), puts);
+    // also write to s3
+    q.await(callback);
 };
 
-function partsRequired(feature) {
-    var buf = geobuf.featureToGeobuf(feature).toBuffer();
-    return Math.ceil(buf.length / MAX_ENTRY_BYTES);
-}
+// Cardboard.prototype.del = function(primary, layer, callback) {
+//     this.get(primary, layer, function(err, res) {
+//         if (err) return callback(err);
+//         var indexes = geojsonCover.geometryIndexes(res[0].value.geometry);
+//         var params = {
+//             RequestItems: {}
+//         };
+//         function deleteId(id) {
+//             return {
+//                 DeleteRequest: {
+//                     Key: { id: { S: id }, layer: { S: layer } }
+//                 }
+//             };
+//         }
+//         // TODO: how to get table name properly here.
+//         params.RequestItems.geo = [
+//             deleteId('id!' + primary + '!0')
+//         ];
+//         var parts = partsRequired(res[0].value);
+//         for (var i = 0; i < indexes.length; i++) {
+//             for (var j = 0; j < parts; j++) {
+//                 params.RequestItems.geo.push(deleteId('cell!' + indexes[i] + '!' + primary + '!' + j));
+//             }
+//         }
+//         dyno.batchWriteItem(params, function(err, res) {
+//             callback(null);
+//         });
+//     });
+// };
 
 Cardboard.prototype.get = function(primary, layer, callback) {
-    var dyno = this.dyno;
-    dyno.query({
-        id: { 'BEGINS_WITH': 'id!' + primary },
-        layer: { 'EQ': layer }
-    }, { pages: 0 }, function(err, res) {
+    db.get('id!' + primary, function(err, value) {
         if (err) return callback(err);
-        callback(err, parseQueryResponse([res]));
+        callback(err, [{id:primary, val:geobuf.geobufToFeature(value)}]);
     });
 };
 
+function query(opts, callback){
+    var results = [];
+    db.createReadStream(opts)
+    .on('data', function (data) {
+        var parts = data.key.split('!');
+        results.push({
+            index: parts[1],
+            primary: parts[2],
+            val: data.value
+        });
+    })
+    .on('error', function (err) {
+        callback(err);
+    })
+    .on('end', function () {
+        callback(null, results);
+    });
+}
+
+
 Cardboard.prototype.bboxQuery = function(input, layer, callback) {
-    var indexes = geojsonCover.bboxQueryIndexes(input);
+    var indexes = geojsonCover.bboxQueryIndexes(input, true, this.coverOpts);
     var q = queue(100);
-    var dyno = this.dyno;
     log('querying with ' + indexes.length + ' indexes');
+    var bench = {query: +new Date()};
+
     indexes.forEach(function(idx) {
         q.defer(
-            dyno.query,
+            query,
             {
-                id: { 'BETWEEN': [ 'cell!' + idx[0], 'cell!' + idx[1] ] },
-                layer: { 'EQ': layer }
-            },
-            { pages: 0 }
+                gte:'cell!' + idx[0],
+                lte:'cell!' + idx[1],
+            }
         );
     });
     q.awaitAll(function(err, res) {
+        bench.query = (+new Date()) - bench.query;
+        bench.features = +new Date();
         if (err) return callback(err);
+        res = parseQueryResponse(res);
+        // get geometries
+        var ids = res.map(function(r){
+            return r.primary;
+        });
+        this.getBatch(ids, layer, results);
+    }.bind(this));
+    function results(err, data) {
+        bench.features = (+new Date()) - bench.features;
+        callback(err, {data: data, bench:bench});
+    }
+};
 
-        callback(err, parseQueryResponse(res));
+Cardboard.prototype.getBatch = function(ids, layer, callback) {
+    var q = queue(100);
+
+    ids.forEach(get);
+    function get(primary){
+        q.defer(function(cb){
+            db.get('id!' + primary, function(err, value) {
+                if (err) return cb(err);
+                cb(err, {id:primary, val:geobuf.geobufToFeature(value)});
+            });
+        });
+    }
+    q.awaitAll(function(err, data){
+
+        //console.log('data', data)
+        callback(err, data);
     });
 };
 
 function parseQueryResponse(res) {
-    res = res.map(function(r) {
-        return r.items.map(function(i) {
-            i.id_parts = i.id.split('!');
-            return i;
-        });
-    });
 
     var flat = _(res).chain().flatten().sortBy(function(a) {
-        return a.id_parts[2];
+        return a.primary;
     }).value();
 
     flat = uniq(flat, function(a, b) {
-        return a.id_parts[2] !== b.id_parts[2] ||
-            a.id_parts[3] !== b.id_parts[3];
+        return a.primary !== b.primary;
     }, true);
 
-    flat = _.groupBy(flat, function(_) {
-        return _.id_parts[2];
-    });
-
-    flat = _.values(flat);
-
-    flat = flat.map(function(_) {
-        var concatted = Buffer.concat(_.map(function(i) {
-            return i.val;
-        }));
-        _[0].val = concatted;
-        return _[0];
-    });
-
-    return flat.map(function(i) {
-        i.val = geobuf.geobufToFeature(i.val);
-        return i;
-    });
+    return flat;
 }
 
+Cardboard.prototype.list = function(layer, callback) {
+    query({gte:'id',lte:'id!!'}, function(err, res){
+        if (err) return callback(err);
+        var res = res.map(function(r){
+            return {id: r.index, val: geobuf.geobufToFeature(r.val), layer: layer};
+        });
+        callback(err, res);
+    });
+};
+
+
 Cardboard.prototype.dump = function(cb) {
-    return this.dyno.scan(cb);
+    var data = [];
+    db.createReadStream()
+        .on('data', function(d){
+            data.push(d);
+        })
+        .on('error', function(){
+            cb(err);
+        })
+        .on('end', function(){
+            cb(null, data);
+        });
 };
 
 Cardboard.prototype.dumpGeoJSON = function(callback) {
-    return this.dyno.scan(function(err, res) {
+    return this.dump(function(err, res) {
         if (err) return callback(err);
         return callback(null, {
             type: 'FeatureCollection',
-            features: res.items.map(function(f) {
+            features: res.map(function(f) {
                 return {
                     type: 'Feature',
                     properties: {
@@ -200,7 +215,7 @@ Cardboard.prototype.dumpGeoJSON = function(callback) {
 Cardboard.prototype.export = function(_) {
     return this.dyno.scan()
         .pipe(through({ objectMode: true }, function(data, enc, cb) {
-             this.push(geobuf.geobufToFeature(data.val));
+             this.push(geobuf.geobufToFeature(data.value));
              cb();
         }))
         .pipe(geojsonStream.stringify());
