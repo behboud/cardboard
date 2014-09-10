@@ -3,6 +3,7 @@ var test = require('tap').test,
     queue = require('queue-async'),
     concat = require('concat-stream'),
     _ = require('lodash'),
+    bufferEqual = require('buffer-equal'),
     Cardboard = require('../'),
     Metadata = require('../lib/metadata'),
     geojsonExtent = require('geojson-extent'),
@@ -1010,6 +1011,313 @@ test('getDatasetInfo', function(t) {
         t.ifError(err, 'got metadata');
         t.deepEqual(info, initial, 'metadata is correct');
         t.end();
+    }
+});
+teardown();
+
+// Retryability
+setup();
+test('idempotent insert: no feature id fail', function(t) {
+    var feature = fixtures.nullIsland;
+    var dataset = 'default';
+    var cardboard = new Cardboard(config);
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ok(err, 'expected error');
+        t.equal(err.message, 'Feature does not specify an id', 'expected error message');
+        countRecords(insertAgain);
+    });
+
+    function countRecords(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 0, 'no records');
+            callback();
+        });
+    }
+
+    function insertAgain() {
+        cardboard.insert(feature, dataset, function(err, res) {
+            t.ok(err, 'expected error');
+            t.equal(err.message, 'Feature does not specify an id', 'expected error message');
+            countRecords(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent insert: s3 fail', function(t) {
+    var idaho = geojsonFixtures.featurecollection.idaho.features.filter(function(f) {
+        return f.properties.GEOID === '16049960100';
+    })[0];
+    var feature = _.extend({id: 'null'}, idaho);
+    var dataset = 'default';
+    var borkedS3 = {
+        putObject: function(params, callback) {
+            callback(new Error('I will never work'));
+        }
+    };
+    var cardboard = new Cardboard(_.defaults({ s3: borkedS3 }, config));
+    
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ok(err, 'expected error');
+        t.equal(err.message, 'I will never work', 'expected error message');
+        countRecords(insertAgain);
+    });
+
+    function countRecords(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 0, 'no records');
+            callback();
+        });
+    }
+
+    function insertAgain() {
+        cardboard.insert(feature, dataset, function(err, res) {
+            t.ok(err, 'expected error');
+            t.equal(err.message, 'I will never work', 'expected error message');
+            countRecords(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent insert: dynamo fail', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var dataset = 'default';
+    var borkedDyno = {
+        putItem: function(item, options, callback) {
+            callback(new Error('I will never work'));
+        }
+    };
+    var borkedCardboard = new Cardboard(_.defaults({ dyno: borkedDyno }, config));
+    var cardboard = new Cardboard(config);
+    
+    borkedCardboard.insert(feature, dataset, function(err, res) {
+        t.ok(err, 'expected error');
+        t.equal(err.message, 'I will never work', 'expected error message');
+        countRecords(insertAgain);
+    });
+
+    function countRecords(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 0, 'no records');
+            callback();
+        });
+    }
+
+    function insertAgain() {
+        borkedCardboard.insert(feature, dataset, function(err, res) {
+            t.ok(err, 'expected error');
+            t.equal(err.message, 'I will never work', 'expected error message');
+            countRecords(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent insert: default metadata fail', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var dataset = 'default';
+    var borkedMetadata = {
+        defaultInfo: function(callback) {
+            callback(new Error('I will never work'));
+        }
+    };
+    var cardboard = new Cardboard(_.defaults({ metadata: borkedMetadata }, config));
+    var item;
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ok(err, 'expected error');
+        t.equal(err.message, 'I will never work', 'expected error message');
+        checkDatabase(insertAgain);
+    });
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 1, 'one record');
+            if (item) {
+                var oldItem = _.omit(item, 'val');
+                var newItem = _.omit(res.items[0], 'val');
+                t.deepEqual(newItem, oldItem, 'identical records');
+                if (item.val)
+                    t.ok(bufferEqual(item.val, res.items[0].val), 'identical buffers');
+            }
+            else item = res.items[0];
+            callback();
+        });
+    }
+
+    function insertAgain() {
+        cardboard.insert(feature, dataset, function(err, res) {
+            t.ok(err, 'expected error');
+            t.equal(err.message, 'I will never work', 'expected error message');
+            checkDatabase(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent insert: adjustBounds fail', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var dataset = 'default';
+    var validMetadata = Metadata(dyno, dataset);
+    var borkedMetadata = {
+        defaultInfo: validMetadata.defaultInfo,
+        adjustBounds: function(bounds, callback) {
+            callback(new Error('I will never work'));
+        }
+    };
+    var cardboard = new Cardboard(_.defaults({ metadata: borkedMetadata }, config));
+    var item, metadata;
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ok(err, 'expected error');
+        t.equal(err.message, 'I will never work', 'expected error message');
+        checkDatabase(insertAgain);
+    });
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 2, 'one record');
+            
+            var thisItem = _.find(res.items, function(i) { 
+                return i.id.indexOf('id') === 0;
+            });
+            var thisMetadata = _.find(res.items, function(i) {
+                return i.id.indexOf('metadata') === 0;
+            });
+
+            if (item && metadata) {
+                t.deepEqual(thisMetadata, metadata, 'identical metadata');
+                var oldItem = _.omit(item, 'val');
+                var newItem = _.omit(thisItem, 'val');
+                t.deepEqual(newItem, oldItem, 'identical records');
+                if (item.val)
+                    t.ok(bufferEqual(item.val, thisItem.val), 'identical buffers');
+            } else {
+                item = thisItem;
+                metadata = thisMetadata;
+            }
+
+            callback();
+        });
+    }
+
+    function insertAgain() {
+        cardboard.insert(feature, dataset, function(err, res) {
+            t.ok(err, 'expected error');
+            t.equal(err.message, 'I will never work', 'expected error message');
+            checkDatabase(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent insert: success', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var dataset = 'default';
+    var cardboard = new Cardboard(config);
+    var item, metadata;
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ifError(err, 'inserted');
+        checkDatabase(insertAgain);
+    });
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 2, 'two records');
+
+            var thisItem = _.find(res.items, function(i) { 
+                return i.id.indexOf('id') === 0;
+            });
+            var thisMetadata = _.find(res.items, function(i) {
+                return i.id.indexOf('metadata') === 0;
+            });
+
+            if (item && metadata) {
+                t.deepEqual(thisMetadata, metadata, 'identical metadata');
+                var oldItem = _.omit(item, 'val');
+                var newItem = _.omit(thisItem, 'val');
+                t.deepEqual(newItem, oldItem, 'identical records');
+                if (item.val)
+                    t.ok(bufferEqual(item.val, thisItem.val), 'identical buffers');
+            } else {
+                item = thisItem;
+                metadata = thisMetadata;
+            }
+            callback();
+        });
+    }
+
+    function insertAgain() {
+        cardboard.insert(feature, dataset, function(err, res) {
+            t.ifError(err, 'inserted again');
+            checkDatabase(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent insert: success with state change between inserts', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var dataset = 'default';
+    var cardboard = new Cardboard(config);
+    var item, metadata;
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ifError(err, 'inserted');
+        feature.properties.newProp = 'bananas';
+        cardboard.update(feature, dataset, function(err) {
+            t.ifError(err, 'updated');
+            checkDatabase(insertAgain);
+        });
+    });
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 2, 'two records');
+
+            var thisItem = _.find(res.items, function(i) { 
+                return i.id.indexOf('id') === 0;
+            });
+            var thisMetadata = _.find(res.items, function(i) {
+                return i.id.indexOf('metadata') === 0;
+            });
+
+            if (item && metadata) {
+                t.deepEqual(thisMetadata, metadata, 'identical metadata');
+                var oldItem = _.omit(item, 'val');
+                var newItem = _.omit(thisItem, 'val');
+                t.deepEqual(newItem, oldItem, 'identical records');
+                if (item.val)
+                    t.ok(bufferEqual(item.val, thisItem.val), 'identical buffers');
+            } else {
+                item = thisItem;
+                metadata = thisMetadata;
+            }
+            callback();
+        });
+    }
+
+    function insertAgain() {
+        cardboard.insert(feature, dataset, function(err, res) {
+            t.ifError(err, 'inserted again');
+            checkDatabase(t.end.bind(t));
+        });
     }
 });
 teardown();

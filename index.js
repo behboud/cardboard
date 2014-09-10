@@ -25,15 +25,15 @@ var LARGE_INDEX_DISTANCE = 50; //bbox more then 100 miles corner to corner.
 module.exports = function Cardboard(c) {
     var cardboard = {};
 
-    var dyno = Dyno(c);
     AWS.config.update({
         accessKeyId: c.awsKey,
         secretAccessKey: c.awsSecret,
         region: c.region || 'us-east-1',
     });
 
-    // allow for passed in config object to override s3 object for mocking in tests
+    // allow for passed in config object to override s3, dyno, metadata objects for mocking in tests
     var s3 = c.s3 || new AWS.S3();
+    var dyno = c.dyno || Dyno(c);
     if(!c.bucket) throw new Error('No bucket set');
     var bucket = c.bucket;
     if(!c.prefix) throw new Error('No s3 prefix set');
@@ -66,7 +66,7 @@ module.exports = function Cardboard(c) {
     cardboard.insert = function(feature, dataset, callback) {
         if (!feature.id) return callback(new Error('Feature does not specify an id'));
 
-        var metadata = Metadata(dyno, dataset),
+        var metadata = c.metadata ? c.metadata : Metadata(dyno, dataset),
             timestamp = (+new Date()),
             primary = feature.id,
             buf = geobuf.featureToGeobuf(feature).toBuffer(),
@@ -116,7 +116,7 @@ module.exports = function Cardboard(c) {
     cardboard.update = function(feature, dataset, callback) {
         if (!feature.id) return callback(new Error('Feature does not specify an id'));
 
-        var metadata = Metadata(dyno, dataset),
+        var metadata = c.metadata ? c.metadata : Metadata(dyno, dataset),
             timestamp = (+new Date()),
             primary = feature.id,
             s3Key = [prefix, dataset, primary, timestamp].join('/'),
