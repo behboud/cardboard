@@ -41,169 +41,220 @@ module.exports = function Cardboard(c) {
 
     // If feature.id isnt set, this works like an insert, and assigns an id
     // if feature.id is set, its an update, if the feature doesnt exist it will fail.
+    // In the insert case this operation should not be retried. The caller is given
+    // a primary key and advised to retry the insert via cardboard.insert
     cardboard.put = function(feature, dataset, callback) {
-        if(!feature.id){
-            insert(feature, dataset, callback);
+        var f = _.clone(feature);
+        if (!f.id) {
+            f.id = cuid();
+            cardboard.insert(f, dataset, function(err, primary, timestamp) {
+                if (err) return callback(err, f.id);
+                callback(null, primary, timestamp);
+            });
         } else {
-            update(feature, dataset, callback);
+            cardboard.update(f, dataset, callback);
         }
     };
 
-    function insert(feature, dataset, callback) {
-        var level = indexLevel(feature);
-        var indexes = geojsonCover.geometryIndexes(feature.geometry, coverOpts[level]);
-        var primary = cuid();
-        var metadata = Metadata(dyno, dataset);
+    // Retryable insert operation. Does not update indexes.
+    // - feature: GeoJSON object with a specified feature.id
+    // - dataset: the name of the cardboard dataset
+    // - callback: if an error is encountered and the second argument passed to
+    //     callback is truthy, then the caller is advised to retry the request. 
+    //     If the second argument is falsey then the caller is advised not to retry
+    //     the request. Usually this means that the request will always fail.
+    cardboard.insert = function(feature, dataset, callback) {
+        if (!feature.id) return callback(new Error('Feature does not specify an id'));
 
-        log('insert', primary, (feature.properties ? feature.properties.id : 'undefined'), dataset, 'level:', level, 'indexes:', indexes.length);
-        var q = queue();
-        var buf = geobuf.featureToGeobuf(feature).toBuffer();
+        var metadata = Metadata(dyno, dataset),
+            timestamp = (+new Date()),
+            primary = feature.id,
+            buf = geobuf.featureToGeobuf(feature).toBuffer(),
+            bounds = extent(feature),
+            useS3 = buf.length > MAX_GEOMETRY_SIZE,
+            s3Key = [prefix, dataset, primary, timestamp].join('/'),
+            s3Params = { Bucket: bucket, Key: s3Key, Body: buf };
+        
+        var item = {
+            dataset: dataset,
+            id: ['id', primary].join('!'),
+            timestamp: timestamp
+        };
 
-        function item(id) {
-            var obj = {
-                id: id,
-                dataset: dataset,
-                geometryid: primary
-            };
+        if (useS3) item.geometryid = s3Key;
+        else item.val = buf;
+            
+        var condition = { expected: {} };
+        condition.expected.id = { ComparisonOperator: 'NULL' };
 
-            if(buf.length <= MAX_GEOMETRY_SIZE){
-                obj.val = buf;
-            }
-            return obj;
-        }
-        var items = [];
-        for(var i=0; i < indexes.length; i++) {
-            items.push(item('cell!' + level + '!' + indexes[i] + '!' + primary));
-        }
-        items.push(item('id!' + primary));
-
-        // If the user specified an id in properties, index it.
-        if(feature.properties && feature.properties.id) {
-            items.push(item('usid!' + feature.properties.id + '!' + primary));
-        }
-
-        q.defer(dyno.putItems, items, {errors:{throughput:10}});
-
-        q.defer(s3.putObject.bind(s3), {
-            Key: [prefix, dataset, primary].join('/'),
-            Bucket: bucket,
-            Body: buf
+        var q = queue(1);
+        if (useS3) q.defer(s3.putObject.bind(s3), s3Params);
+        q.defer(dyno.putItem, item, condition);
+        q.await(function(err) {
+            if (err && err.code !== 'ConditionalCheckFailedException') return callback(err, true);
+            updateMetadata();
         });
-        q.defer(metadata.addFeature, feature);
-        q.awaitAll(function(err, res) {
-            callback(err, primary);
+
+        function updateMetadata() {
+            queue(1)
+                .defer(metadata.defaultInfo)
+                .defer(metadata.adjustBounds, bounds)
+                .await(function(err) {
+                    if (err) return callback(err, true);
+                    callback(null, primary, timestamp);
+                });
+        }
+    };
+
+    // Retryable update operation. Does not update indexes.
+    // - feature: GeoJSON object with a specified feature.id
+    // - dataset: the name of the cardboard dataset
+    // - callback: if an error is encountered, and the second argument passed to
+    //     callback is truthy, then the caller is advised to retry the request. 
+    //     If the second argument is falsey then the caller is advised not to retry
+    //     the request. Usually this means that the request will always fail.
+    cardboard.update = function(feature, dataset, callback) {
+        if (!feature.id) return callback(new Error('Feature does not specify an id'));
+
+        var metadata = Metadata(dyno, dataset),
+            timestamp = (+new Date()),
+            primary = feature.id,
+            s3Key = [prefix, dataset, primary, timestamp].join('/'),
+            buf = geobuf.featureToGeobuf(feature).toBuffer(),
+            bounds = extent(feature),
+            useS3 = buf.length > MAX_GEOMETRY_SIZE,
+            s3Params = { Bucket: bucket, Key: s3Key, Body: buf },
+            key = { dataset: dataset, id: ['id', primary].join('!') },
+            query = { dataset: { EQ: dataset }, id: { EQ: key.id } };
+
+        var item = { put: {}, delete: {} };
+        item.put.timestamp = timestamp;
+        if (useS3) {
+            item.put.geometryid = s3Key;
+            item.delete.val = '';
+        } else {
+            item.delete.geometryid = '';
+            item.put.val = buf;
+        }
+            
+        dyno.getItem(key, function(err, original) {
+            if (err) return callback(err, true);
+
+            var updatedItem;
+            var condition = { expected: {} };
+            condition.expected.timestamp = { EQ: original.Item.timestamp };
+
+            var q = queue(1);
+            if (useS3) q.defer(s3.putObject.bind(s3), s3Params);
+            q.defer(dyno.updateItem, key, item, condition);
+            q.defer(metadata.defaultInfo);
+            q.defer(metadata.adjustBounds, bounds);
+            q.awaitAll(function(err, res) {
+                // advise not to retry if you're trying to update out-of-order
+                if (err && err.code === 'ConditionalCheckFailedException') return callback(err, false);
+                if (err) return callback(err, true);
+                callback(null, primary, timestamp);
+            });
         });
-    }
+    };
 
-    function update(feature, dataset, callback) {
-        var level = indexLevel(feature);
-        var indexes = geojsonCover.geometryIndexes(feature.geometry, coverOpts[level]);
-        var buf = geobuf.featureToGeobuf(feature).toBuffer();
+    // Retryable remove operation. Does not update indexes.
+    // - primary: id of a feature
+    // - dataset: the name of the cardboard dataset
+    // - callback: if an error is encountered, and the second argument passed to
+    //     callback is truthy, then the caller is advised to retry the request. 
+    //     If the second argument is falsey then the caller is advised not to retry
+    //     the request. Usually this means that the request will always fail.
+    cardboard.remove = function(primary, dataset, updateIndex, callback) {
+        if (typeof updateIndex === 'function') {
+            callback = updateIndex;
+            updateIndex = false;
+        }
 
-        log('update', feature.id, dataset, 'level:', level, 'indexes:', indexes.length);
+        var key = { dataset: dataset, id: ['id', primary].join('!') };
 
-        // load existing feature.
-        cardboard.get(feature.id, dataset, gotFeature);
-        function gotFeature(err, featureCollection) {
-            if(err) return callback(err, null);
-            if(featureCollection.features.length === 0) return callback(new Error('Update failed. Feature does not exist'));
+        dyno.deleteItems([ key ], function(err) {
+            if (err) return callback(err, true);
+            else callback();
+        });
+    };
 
-            var existingFeature = featureCollection.features[0];
-            var existingLevel = indexLevel(existingFeature);
-            var existingIndexes = geojsonCover.geometryIndexes(existingFeature, coverOpts[existingLevel]);
-            var existingBuf = geobuf.featureToGeobuf(existingFeature).toBuffer();
-            // If existingLevel and level dont match, the feature crossed into a diff
-            // sized index. Delete them all and insert again.
+    cardboard.addFeatureIndexes = function(primary, dataset, timestamp, callback) {
+        var key = { dataset: dataset, id: ['id', primary].join('!') };
 
-            var toDelete = _.difference(existingIndexes, indexes);
-            var toInsert = _.difference(indexes, existingIndexes);
-            var toUpdate = _.intersection(existingIndexes, indexes);
-            var q = queue(50);
+        dyno.getItem(key, function(err, item) {
+            if (err) return callback(err); // advise not to retry?
+            if (item.Item.timestamp !== timestamp) return callback(new Error('Update applied out-of-order'), false);
+            resolveFeature(item.Item, function(err, feature) {
+                if (err) return callback(err); // TODO: unpack error cases here, how to advise?
+                buildIndexes(feature);
+            });
+        });
 
-            var deleteKeys = toDelete.map(function(id){
+        function buildIndexes(feature) {
+            var usid = feature.properties && feature.properties.id ? feature.properties.id : null,
+                level = indexLevel(feature),
+                indexes = geojsonCover.geometryIndexes(feature.geometry, coverOpts[level]);
+
+            var indexItems = indexes.map(function(index) {
                 return {
                     dataset: dataset,
-                    id: 'cell!' + existingLevel + '!' + id + '!' + feature.id
+                    id: ['cell', level, index, primary].join('!'),
+                    primary: primary
                 };
             });
 
-            var insertItems = [];
-            for(var i=0; i < toInsert.length; i++) {
-                insertItems.push(item('cell!' + level + '!' + toInsert[i] + '!' + feature.id));
-            }
-            q.defer(dyno.putItems, insertItems, {errors:{throughput:10}});
-
-            var updateDoc;
-            if(buf.length <= MAX_GEOMETRY_SIZE){
-                updateDoc = { put: {val: buf }};
-            }else if(buf.length > MAX_GEOMETRY_SIZE && existingBuf <= MAX_GEOMETRY_SIZE) {
-                updateDoc = { delete: {val: buf }};
-            }
-            if(updateDoc){
-                for(var i=0; i < toUpdate.length; i++) {
-                    q.defer(dyno.updateItem,
-                        {
-                            id: 'cell!' + level + '!' + toUpdate[i] + '!' + feature.id,
-                            dataset: dataset
-                        },
-                        updateDoc,
-                        { errors: { throughput: 10 } }
-                    );
-                }
-
-                q.defer(dyno.updateItem,
-                    {
-                        id: 'id!' + feature.id,
-                        dataset: dataset
-                    },
-                    updateDoc,
-                    { errors: { throughput: 10 } }
-                );
-
-                // If the user specified an id in properties, index it.
-                if(feature.properties && feature.properties.id) {
-                    q.defer(dyno.updateItem,
-                        {
-                            id: 'usid!' + feature.properties.id + '!' + feature.id,
-                            dataset: dataset
-                        },
-                        updateDoc,
-                        { errors: { throughput: 10 } }
-                    );
-                } else if(existingFeature.properties && existingFeature.properties.id) {
-                    // they used to have a properties id. It was removed. Remove the item from the index
-                    deleteKeys.push({
-                        dataset: dataset,
-                        id: 'usid!' + existingFeature.properties.id + '!' + feature.id
-                    })
-                }
-            }
-            q.defer(dyno.deleteItems, deleteKeys, {errors:{throughput:10}});
-
-            var metadata = Metadata(dyno, dataset);
-            q.defer(metadata.updateFeature, existingFeature, feature);
-
-            q.defer(s3.putObject.bind(s3), {
-                Key: [prefix, dataset, feature.id].join('/'),
-                Bucket: bucket,
-                Body: buf
-            })
-            q.awaitAll(function(err, res) {
-                callback(err, feature.id);
-            });
-        };
-
-        function item(id, update) {
-            var obj = {
-                id: id,
+            if (usid) indexItems.push({
                 dataset: dataset,
-                geometryid: feature.id
-            };
+                id: ['userid', usid, primary].join('!'),
+                primary: primary
+            });
 
-            if(buf.length < MAX_GEOMETRY_SIZE){
-                obj.val = buf;
-            }
-            return obj;
+            queue(1)
+                .defer(cardboard.removeFeatureIndexes, primary, dataset)
+                .defer(dyno.putItems, indexItems)
+                .await(callback); // TODO: advise retry all cases??
+        }
+    };
+
+    cardboard.removeFeatureIndexes = function(primary, dataset, callback) {
+        var query = { dataset: { EQ: dataset }, primary: { EQ: primary } },
+            options = { index: 'primary', attributes: ['id'], pages: 0 };
+
+        dyno.query(query, options, function(err, res) {
+            if (err) return callback(err);
+
+            var keys = res.items.map(function(item) {
+                return { dataset: dataset, id: item.id };
+            });
+
+            dyno.deleteItems(keys, callback);
+        });
+    }
+
+    function resolveFeature(item, callback) {
+        var val = item.val,
+            geometryid = item.geometryid,
+            primary = item.id.split('!')[1];
+
+        if (val) return toFeature(val);
+        
+        if (geometryid) {
+            return s3.getObject({
+                Bucket: bucket,
+                Key: geometryid
+            }, function(err, data) {
+                if (err) return callback(err);
+                toFeature(data.Body);
+            });
+        }
+        
+        callback(new Error('No defined geometry'));
+
+        function toFeature(data) {
+            var feature = geobuf.geobufToFeature(data);
+            feature.id = feature.id || primary;
+            callback(null, feature);
         }
     }
 
@@ -211,32 +262,6 @@ module.exports = function Cardboard(c) {
         var table = require('./lib/table.json');
         table.TableName = tableName;
         dyno.createTable(table, callback);
-    };
-
-    cardboard.delFeature = function(primary, dataset, callback) {
-        cardboard.get(primary, dataset, function(err, res) {
-            if (err) return callback(err);
-            var metadata = Metadata(dyno, dataset);
-            var indexes = geojsonCover.geometryIndexes(res.features[0], coverOpts);
-            var params = {
-                RequestItems: {}
-            };
-
-            var keys = [{ id: 'id!' + primary, dataset: dataset }];
-
-            if(res.features[0].properties && res.features[0].properties.id) {
-                keys.push({ id: 'usid!' + res.features[0].properties.id + '!' + primary, dataset: dataset })
-            }
-
-            for (var i = 0; i < indexes.length; i++) {
-                keys.push({id: 'cell!' + indexes[i] + '!' + primary, dataset: dataset});
-            }
-            
-            queue()
-                .defer(dyno.deleteItems, keys)
-                .defer(metadata.deleteFeature, res.features[0])
-                .awaitAll(callback);
-        });
     };
 
     cardboard.delDataset = function(dataset, callback) {
@@ -253,6 +278,7 @@ module.exports = function Cardboard(c) {
             });
         });
     };
+
     cardboard.getBySecondaryId = function(id, dataset, callback) {
         dyno.query({
             id: { 'BEGINS_WITH': 'usid!' + id },
@@ -275,33 +301,44 @@ module.exports = function Cardboard(c) {
                 callback(err, fc);
             }
         });
-
     };
+
     cardboard.get = function(primary, dataset, callback) {
-        dyno.query({
-            id: { 'EQ': 'id!' + primary },
-            dataset: { 'EQ': dataset }
+        dyno.getItem({
+            dataset: dataset,
+            id: ['id', primary].join('!')
         }, function(err, res) {
             if (err) return callback(err);
-            var res = parseQueryResponse([res]);
-
-            if(res.length === 0) return callback(null, featureCollection());
-
-            if(res[0].val) {
-                respond(res[0]);
-            } else {
-                getFeatures(dataset, res, function(err, result) {
-                    if(err) return callback(err);
-                    respond(result[0]);
-                });
-            }
-
-            function respond(feature) {
-                feature.val = geobuf.geobufToFeature(feature.val);
-                feature.val.id = feature.geometryid;
-                return callback(err, featureCollection([feature.val]));
-            }
+            resolveFeature(res.Item, function(err, feature) {
+                if (err) return callback(err);
+                callback(null, featureCollection([feature]));
+            });
         });
+
+        // dyno.query({
+        //     id: { 'EQ': 'id!' + primary },
+        //     dataset: { 'EQ': dataset }
+        // }, function(err, res) {
+        //     if (err) return callback(err);
+        //     var res = parseQueryResponse([res]);
+
+        //     if(res.length === 0) return callback(null, featureCollection());
+
+        //     if(res[0].val) {
+        //         respond(res[0]);
+        //     } else {
+        //         getFeatures(dataset, res, function(err, result) {
+        //             if(err) return callback(err);
+        //             respond(result[0]);
+        //         });
+        //     }
+
+        //     function respond(feature) {
+        //         feature.val = geobuf.geobufToFeature(feature.val);
+        //         feature.val.id = feature.geometryid;
+        //         return callback(err, featureCollection([feature.val]));
+        //     }
+        // });
     };
 
     function getFeatures(dataset, features, callback) {

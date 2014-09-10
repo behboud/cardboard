@@ -2,11 +2,26 @@
     "TableName": "geo",
     "AttributeDefinitions": [
         {"AttributeName": "dataset", "AttributeType": "S"},
-        {"AttributeName": "id", "AttributeType": "S"}
+        {"AttributeName": "id", "AttributeType": "S"},
+        {"AttributeName": "primary", "AttributeType": "S"}
     ],
     "KeySchema": [
         {"AttributeName": "dataset", "KeyType": "HASH"},
         {"AttributeName": "id", "KeyType": "RANGE"}
+    ],
+    "GlobalSecondaryIndexes": [
+        {
+            "IndexName": "primary",
+            "KeySchema": [
+                {"AttributeName": "dataset", "KeyType": "HASH"},
+                {"AttributeName": "primary", "KeyType": "RANGE"}
+            ],
+            "Projection": { "ProjectionType": "KEYS_ONLY" },
+            "ProvisionedThroughput": {
+                "ReadCapacityUnits": 5,
+                "WriteCapacityUnits": 50
+            }
+        }
     ],
     "ProvisionedThroughput": {
         "ReadCapacityUnits": 5,

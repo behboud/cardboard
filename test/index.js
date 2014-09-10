@@ -102,34 +102,40 @@ test('dumpGeoJSON', function(t) {
 teardown();
 
 setup();
-test('insert & dump', function(t) {
+test('insert, index & dump', function(t) {
     var cardboard = Cardboard(config);
+    var dataset = 'default';
 
-    cardboard.put(fixtures.nullIsland, 'default', function(err) {
+    cardboard.put(fixtures.nullIsland, dataset, function(err, primary, timestamp) {
         t.equal(err, null);
         t.pass('inserted');
-        cardboard.dump(function(err, data) {
-            t.equal(err, null);
-            t.equal(data.items.length, 3, 'creates data and metadata');
-            t.end();
+        cardboard.addFeatureIndexes(primary, dataset, timestamp, function(err) {
+            t.ifError(err, 'indexed feature');
+            cardboard.dump(function(err, data) {
+                t.equal(err, null);
+                t.equal(data.items.length, 3, 'creates data, index and metadata');
+                t.end();
+            });
         });
     });
 });
 teardown();
 
 setup();
-test('insert & get by index', function(t) {
+test('insert, index & get by index', function(t) {
     var cardboard = Cardboard(config);
 
-    cardboard.put(fixtures.nullIsland, 'default', function(err, primary) {
-        t.equal(err, null);
-        t.pass('inserted');
-        cardboard.get(primary, 'default', function(err, data) {
-            t.equal(err, null);
-            fixtures.nullIsland.id = primary;
-            t.deepEqual(data, geojsonNormalize(fixtures.nullIsland));
-            delete fixtures.nullIsland.id;
-            t.end();
+    cardboard.put(fixtures.nullIsland, 'default', function(err, primary, timestamp) {
+        t.ifError(err, 'inserted');
+        cardboard.addFeatureIndexes(primary, 'default', timestamp, function(err) {
+            t.ifError(err, 'indexed feature');
+            cardboard.get(primary, 'default', function(err, data) {
+                t.equal(err, null);
+                fixtures.nullIsland.id = primary;
+                t.deepEqual(data, geojsonNormalize(fixtures.nullIsland));
+                delete fixtures.nullIsland.id;
+                t.end();
+            });
         });
     });
 });
@@ -139,37 +145,42 @@ setup();
 test('insert & and update', function(t) {
     var cardboard = Cardboard(config);
 
-    cardboard.put(fixtures.haitiLine, 'default', function(err, primary) {
+    cardboard.put(fixtures.haitiLine, 'default', function(err, primary, timestamp) {
         t.equal(err, null);
         t.ok(primary, 'got id');
         t.pass('inserted');
         fixtures.haitiLine.id = primary;
         fixtures.haitiLine.geometry.coordinates[0][0] = -72.588671875;
 
-        dyno.query({
-            id: { 'BEGINS_WITH': [ 'cell!' ] },
-            dataset: { 'EQ': 'default' }
-        },
-        { pages: 0 },
-        function(err, data){
-            t.equal(data.items.length, 50, 'correct num of index entries');
-            updateFeature();
-        })
+        cardboard.addFeatureIndexes(primary, 'default', timestamp, function(err) {
+            t.ifError(err, 'indexed');
+            dyno.query({
+                id: { 'BEGINS_WITH': [ 'cell!' ] },
+                dataset: { 'EQ': 'default' }
+            },
+            { pages: 0 },
+            function(err, data){
+                t.equal(data.items.length, 50, 'correct num of index entries');
+                updateFeature();
+            });
+        });
 
         function updateFeature(){
-            cardboard.put(fixtures.haitiLine, 'default', function(err, id) {
+            cardboard.put(fixtures.haitiLine, 'default', function(err, id, timestamp) {
                 t.equal(err, null);
                 t.equal(id, primary);
                 delete fixtures.haitiLine.id;
-                dyno.query({
-                    id: { 'BEGINS_WITH': [ 'cell!' ] },
-                    dataset: { 'EQ': 'default' }
-                },
-                { pages: 0 },
-                function(err, data){
+                cardboard.addFeatureIndexes(primary, 'default', timestamp, function(err) {
+                    dyno.query({
+                        id: { 'BEGINS_WITH': [ 'cell!' ] },
+                        dataset: { 'EQ': 'default' }
+                    },
+                    { pages: 0 },
+                    function(err, data){
 
-                    t.equal(data.items.length, 50, 'correct num of index entries');
-                    t.end();
+                        t.equal(data.items.length, 50, 'correct num of index entries');
+                        t.end();
+                    });
                 });
             });
         }
