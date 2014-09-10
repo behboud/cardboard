@@ -47,9 +47,9 @@ module.exports = function Cardboard(c) {
         var f = _.clone(feature);
         if (!f.id) {
             f.id = cuid();
-            cardboard.insert(f, dataset, function(err, primary, timestamp) {
+            cardboard.insert(f, dataset, function(err, res) {
                 if (err) return callback(err, f.id);
-                callback(null, primary, timestamp);
+                callback(null, res);
             });
         } else {
             cardboard.update(f, dataset, callback);
@@ -139,7 +139,7 @@ module.exports = function Cardboard(c) {
             
         dyno.getItem(key, function(err, original) {
             if (err) return callback(err, true);
-            
+
             // advise not to retry, feature does not exist to be updated
             if (!original.Item) 
                 return callback(new Error('Update failed. Feature does not exist'), false);
