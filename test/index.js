@@ -106,9 +106,10 @@ test('insert, index & dump', function(t) {
     var cardboard = Cardboard(config);
     var dataset = 'default';
 
-    cardboard.put(fixtures.nullIsland, dataset, function(err, primary, timestamp) {
+    cardboard.put(fixtures.nullIsland, dataset, function(err, res) {
         t.equal(err, null);
         t.pass('inserted');
+        var primary = res.id, timestamp = res.timestamp;
         cardboard.addFeatureIndexes(primary, dataset, timestamp, function(err) {
             t.ifError(err, 'indexed feature');
             cardboard.dump(function(err, data) {
@@ -125,8 +126,9 @@ setup();
 test('insert, index & get by index', function(t) {
     var cardboard = Cardboard(config);
 
-    cardboard.put(fixtures.nullIsland, 'default', function(err, primary, timestamp) {
+    cardboard.put(fixtures.nullIsland, 'default', function(err, res) {
         t.ifError(err, 'inserted');
+        var primary = res.id, timestamp = res.timestamp;
         cardboard.addFeatureIndexes(primary, 'default', timestamp, function(err) {
             t.ifError(err, 'indexed feature');
             cardboard.get(primary, 'default', function(err, data) {
@@ -142,16 +144,18 @@ test('insert, index & get by index', function(t) {
 teardown();
 
 setup();
-test('insert & and update', function(t) {
+test('insert & update', function(t) {
     var cardboard = Cardboard(config);
 
-    cardboard.put(fixtures.haitiLine, 'default', function(err, primary, timestamp) {
+    cardboard.put(fixtures.haitiLine, 'default', function(err, res) {
         t.equal(err, null);
+        var primary = res.id, timestamp = res.timestamp;
         t.ok(primary, 'got id');
         t.pass('inserted');
         fixtures.haitiLine.id = primary;
         fixtures.haitiLine.geometry.coordinates[0][0] = -72.588671875;
 
+        var primary = res.id, timestamp = res.timestamp;
         cardboard.addFeatureIndexes(primary, 'default', timestamp, function(err) {
             t.ifError(err, 'indexed');
             dyno.query({
@@ -166,8 +170,9 @@ test('insert & and update', function(t) {
         });
 
         function updateFeature(){
-            cardboard.put(fixtures.haitiLine, 'default', function(err, id, timestamp) {
+            cardboard.put(fixtures.haitiLine, 'default', function(err, res) {
                 t.equal(err, null);
+                var id = res.id, timestamp = res.timestamp;
                 t.equal(id, primary);
                 delete fixtures.haitiLine.id;
                 cardboard.addFeatureIndexes(primary, 'default', timestamp, function(err) {
@@ -192,16 +197,17 @@ setup();
 test('insert & delete', function(t) {
     var cardboard = Cardboard(config);
 
-    cardboard.put(fixtures.nullIsland, 'default', function(err, primary) {
+    cardboard.put(fixtures.nullIsland, 'default', function(err, res) {
         t.equal(err, null);
         t.pass('inserted');
+        var primary = res.id, timestamp = res.timestamp;
         cardboard.get(primary, 'default', function(err, data) {
             t.equal(err, null);
             fixtures.nullIsland.id = primary;
             t.deepEqual(data, geojsonNormalize(fixtures.nullIsland));
             delete fixtures.nullIsland.id;
-            cardboard.delFeature(primary, 'default', function(err, data) {
-                t.equal(err, null);
+            cardboard.remove(primary, 'default', function(err, data) {
+                t.ifError(err, 'removed')
                 cardboard.get(primary, 'default', function(err, data) {
                     t.equal(err, null);
                     t.deepEqual(data, emptyFeatureCollection);
@@ -218,9 +224,10 @@ setup();
 test('insert & delDataset', function(t) {
     var cardboard = Cardboard(config);
 
-    cardboard.put(fixtures.nullIsland, 'default', function(err, primary) {
+    cardboard.put(fixtures.nullIsland, 'default', function(err, res) {
         t.equal(err, null);
         t.pass('inserted');
+        var primary = res.id, timestamp = res.timestamp;
         cardboard.get(primary, 'default', function(err, data) {
             t.equal(err, null);
             fixtures.nullIsland.id = primary;
@@ -245,14 +252,12 @@ setup();
 test('listIds', function(t) {
     var cardboard = Cardboard(config);
 
-    cardboard.put(fixtures.nullIsland, 'default', function(err, primary) {
+    cardboard.put(fixtures.nullIsland, 'default', function(err, res) {
         t.equal(err, null);
         t.pass('inserted');
-        cardboard.get(primary, 'default', function(err, data) {
-            t.equal(err, null);
-            fixtures.nullIsland.id = primary;
-            t.deepEqual(data, geojsonNormalize(fixtures.nullIsland));
-            delete fixtures.nullIsland.id;
+        var primary = res.id, timestamp = res.timestamp;
+        cardboard.addFeatureIndexes(primary, 'default', timestamp, function(err, data) {
+            t.ifError(err, 'indexed');
             cardboard.listIds('default', function(err, data) {
                 var expected = [
                     'cell!1!10000000001!' + primary,
@@ -289,26 +294,36 @@ test('insert & query', function(t) {
     ];
     var cardboard = Cardboard(config);
     var insertQueue = queue(1);
+    var indexQueue = queue(1);
 
     [fixtures.nullIsland,
     fixtures.dc].forEach(function(fix) {
-        insertQueue.defer(cardboard.put.bind(cardboard), fix, 'default');
+        insertQueue.defer(cardboard.put, fix, 'default');
     });
 
-    insertQueue.awaitAll(inserted);
+    insertQueue.awaitAll(function(err, res) {
+        t.ifError(err, 'inserted');
+        res.forEach(function(item) {
+            indexQueue.defer(cardboard.addFeatureIndexes, item.id, 'default', item.timestamp);
+        });
+        indexQueue.awaitAll(inserted);
+    });
 
     function inserted() {
         var q = queue(1);
         queries.forEach(function(query) {
             q.defer(function(query, callback) {
                 t.equal(cardboard.bboxQuery(query.query, 'default', function(err, resp) {
-                    t.equal(err, null, 'no error for ' + query.query.join(','));
+                    t.ifError(err, 'no error for ' + query.query.join(','));
+                    if (err) return callback(err);
+
                     t.equal(resp.features.length, query.length, 'finds ' + query.length + ' data with a query');
                     callback();
                 }), undefined, '.bboxQuery');
             }, query);
         });
-        q.awaitAll(function() {
+        q.awaitAll(function(err) {
+            t.ifError(err, 'queries passed');
             t.end();
         });
     }
@@ -382,36 +397,27 @@ teardown();
 setup();
 test('insert idaho', function(t) {
     var cardboard = Cardboard(config);
-    var q = queue(1);
     t.pass('inserting idaho');
-    geojsonFixtures.featurecollection.idaho.features.filter(function(f) {
+    
+    var idaho = geojsonFixtures.featurecollection.idaho.features.filter(function(f) {
         return f.properties.GEOID === '16049960100';
-    }).forEach(function(block) {
-        q.defer(cardboard.put.bind(cardboard), block, 'default');
+    })[0];
+    cardboard.put(idaho, 'default', function(err, res) {
+        t.ifError(err, 'inserted');
+        if (err) return t.end();
+        cardboard.addFeatureIndexes(res.id, 'default', res.timestamp, inserted);
     });
-    q.awaitAll(inserted);
 
-    function inserted(err, res) {
-        if (err) console.error(err);
-        t.notOk(err, 'no error returned');
-        t.pass('inserted idaho');
-        var queries = [
-            {
-                query: [-115.09552001953124,45.719603972998634,-114.77691650390625,45.947330315089275],
-                length: 1
-            }
-        ];
-        var q = queue(1);
-        queries.forEach(function(query) {
-            q.defer(function(query, callback) {
-                t.equal(cardboard.bboxQuery(query.query, 'default', function(err, resp) {
-                    t.equal(err, null, 'no error for ' + query.query.join(','));
-                    t.equal(resp.features.length, query.length, 'finds ' + query.length + ' data with a query');
-                    callback();
-                }), undefined, '.bboxQuery');
-            }, query);
+    function inserted(err) {
+        t.ifError(err, 'indexed');
+        if (err) return t.end();
+
+        var bbox = [-115.09552001953124,45.719603972998634,-114.77691650390625,45.947330315089275];
+        cardboard.bboxQuery(bbox, 'default', function(err, res) {
+            t.ifError(err, 'no error for ' + bbox.join(','));
+            t.equal(res.features.length, 1, 'finds 1 data with a query');
+            t.end();
         });
-        q.awaitAll(function() { t.end(); });
     }
 });
 teardown();
@@ -456,9 +462,20 @@ test('insert feature with user specified id.', function(t) {
     q.defer(cardboard.put, fixtures.haiti, 'haiti');
     q.defer(cardboard.put, fixtures.haitiLine, 'haiti');
 
-    q.awaitAll(getByUserSpecifiedId)
+    q.awaitAll(function(err, res) {
+        var indexQueue = queue();
+        res.forEach(function(item) {
+            indexQueue.defer(cardboard.addFeatureIndexes, item.id, 'haiti', item.timestamp);
+        });
+        indexQueue.awaitAll(function(err) {
+            t.ifError(err, 'indexed');
+            if (err) return t.end();
 
-    function getByUserSpecifiedId(err, ids){
+            getByUserSpecifiedId(res.map(function(item) { return item.id; }));
+        })
+    });
+
+    function getByUserSpecifiedId(ids){
         cardboard.getBySecondaryId(fixtures.haiti.properties.id, 'haiti', function(err, res){
             t.notOk(err, 'should not return an error');
             t.ok(res, 'should return a array of features');
@@ -817,14 +834,14 @@ test('insert idaho & check metadata', function(t) {
     function checkInfo(err, info) {
         t.ifError(err, 'got idaho metadata');
         var expected = {
-          id : "metadata!" + dataset,
-          dataset : dataset,
-          west : -116.108998,
-          south : 45.196187,
-          east : -114.320252,
-          north : 46.671061,
-          count : 1,
-          size : 298712
+            id : "metadata!" + dataset,
+            dataset : dataset,
+            west : -116.108998,
+            south : 45.196187,
+            east : -114.320252,
+            north : 46.671061,
+            count : 0,
+            size : 0
         }
         t.deepEqual(info, expected, 'expected metadata');
         t.end();
@@ -864,8 +881,8 @@ test('insert many idaho features & check metadata', function(t) {
           south : expectedBounds[1],
           east : expectedBounds[2],
           north : expectedBounds[3],
-          count : features.length,
-          size : expectedSize
+          count : 0,
+          size : 0
         }
         t.deepEqual(info, expected, 'expected metadata');
         t.end();
@@ -907,8 +924,8 @@ test('insert many idaho features, delete one & check metadata', function(t) {
           south : expectedBounds[1],
           east : expectedBounds[2],
           north : expectedBounds[3],
-          count : features.length - 1,
-          size : expectedSize
+          count : 0,
+          size : 0
         }
         t.deepEqual(info, expected, 'expected metadata');
         t.end();
@@ -934,7 +951,7 @@ test('insert idaho feature, update & check metadata', function(t) {
         t.notOk(err, 'no error returned');
         t.pass('inserted idaho feature');
 
-        var update = _.extend({ id: res }, edited);
+        var update = _.extend({ id: res.id }, edited);
         expectedSize = JSON.stringify(edited).length;
         cardboard.put(update, dataset, updated);
     }
@@ -953,8 +970,8 @@ test('insert idaho feature, update & check metadata', function(t) {
           south : expectedBounds[1],
           east : expectedBounds[2],
           north : expectedBounds[3],
-          count : 1,
-          size : expectedSize
+          count : 0,
+          size : 0
         }
         t.deepEqual(info, expected, 'expected metadata');
         t.end();
