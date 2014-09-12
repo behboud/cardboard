@@ -18,13 +18,13 @@
             ],
             "Projection": { "ProjectionType": "KEYS_ONLY" },
             "ProvisionedThroughput": {
-                "ReadCapacityUnits": 5,
+                "ReadCapacityUnits": 50,
                 "WriteCapacityUnits": 50
             }
         }
     ],
     "ProvisionedThroughput": {
-        "ReadCapacityUnits": 5,
+        "ReadCapacityUnits": 50,
         "WriteCapacityUnits": 50
     }
 }

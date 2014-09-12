@@ -102,43 +102,37 @@ test('dumpGeoJSON', function(t) {
 teardown();
 
 setup();
-test('insert, index & dump', function(t) {
+test('insert & dump', function(t) {
     var cardboard = Cardboard(config);
     var dataset = 'default';
 
     cardboard.put(fixtures.nullIsland, dataset, function(err, res) {
         t.equal(err, null);
         t.pass('inserted');
-        var primary = res.id, timestamp = res.timestamp;
-        cardboard.addFeatureIndexes(primary, dataset, timestamp, function(err) {
-            t.ifError(err, 'indexed feature');
-            cardboard.dump(function(err, data) {
-                t.equal(err, null);
-                t.equal(data.items.length, 3, 'creates data, index and metadata');
-                t.end();
-            });
+        cardboard.dump(function(err, data) {
+            t.equal(err, null);
+            t.equal(data.items.length, 1, 'creates data index');
+            t.end();
         });
     });
 });
 teardown();
 
 setup();
-test('insert, index & get by index', function(t) {
+test('insert, get by index', function(t) {
     var cardboard = Cardboard(config);
 
     cardboard.put(fixtures.nullIsland, 'default', function(err, res) {
         t.ifError(err, 'inserted');
         var primary = res.id, timestamp = res.timestamp;
-        cardboard.addFeatureIndexes(primary, 'default', timestamp, function(err) {
-            t.ifError(err, 'indexed feature');
-            cardboard.get(primary, 'default', function(err, data) {
-                t.equal(err, null);
-                fixtures.nullIsland.id = primary;
-                t.deepEqual(data, geojsonNormalize(fixtures.nullIsland));
-                delete fixtures.nullIsland.id;
-                t.end();
-            });
+        cardboard.get(primary, 'default', function(err, data) {
+            t.equal(err, null);
+            fixtures.nullIsland.id = primary;
+            t.deepEqual(data, geojsonNormalize(fixtures.nullIsland));
+            delete fixtures.nullIsland.id;
+            t.end();
         });
+
     });
 });
 teardown();
@@ -156,18 +150,6 @@ test('insert & update', function(t) {
         fixtures.haitiLine.geometry.coordinates[0][0] = -72.588671875;
 
         var primary = res.id, timestamp = res.timestamp;
-        cardboard.addFeatureIndexes(primary, 'default', timestamp, function(err) {
-            t.ifError(err, 'indexed');
-            dyno.query({
-                id: { 'BEGINS_WITH': [ 'cell!' ] },
-                dataset: { 'EQ': 'default' }
-            },
-            { pages: 0 },
-            function(err, data){
-                t.equal(data.items.length, 50, 'correct num of index entries');
-                updateFeature();
-            });
-        });
 
         function updateFeature(){
             cardboard.put(fixtures.haitiLine, 'default', function(err, res) {
@@ -175,18 +157,6 @@ test('insert & update', function(t) {
                 var id = res.id, timestamp = res.timestamp;
                 t.equal(id, primary);
                 delete fixtures.haitiLine.id;
-                cardboard.addFeatureIndexes(primary, 'default', timestamp, function(err) {
-                    dyno.query({
-                        id: { 'BEGINS_WITH': [ 'cell!' ] },
-                        dataset: { 'EQ': 'default' }
-                    },
-                    { pages: 0 },
-                    function(err, data){
-
-                        t.equal(data.items.length, 50, 'correct num of index entries');
-                        t.end();
-                    });
-                });
             });
         }
     });
@@ -301,13 +271,7 @@ test('insert & query', function(t) {
         insertQueue.defer(cardboard.put, fix, 'default');
     });
 
-    insertQueue.awaitAll(function(err, res) {
-        t.ifError(err, 'inserted');
-        res.forEach(function(item) {
-            indexQueue.defer(cardboard.addFeatureIndexes, item.id, 'default', item.timestamp);
-        });
-        indexQueue.awaitAll(inserted);
-    });
+    insertQueue.awaitAll(inserted);
 
     function inserted() {
         var q = queue(1);
@@ -398,7 +362,7 @@ setup();
 test('insert idaho', function(t) {
     var cardboard = Cardboard(config);
     t.pass('inserting idaho');
-    
+
     var idaho = geojsonFixtures.featurecollection.idaho.features.filter(function(f) {
         return f.properties.GEOID === '16049960100';
     })[0];
@@ -665,7 +629,7 @@ test('metadata: adjust bounds', function(t) {
     function checkNewInfo(err, info) {
         t.ifError(err, 'get new metadata');
         var expected = {
-            id: 'metadata!' + dataset, 
+            id: 'metadata!' + dataset,
             dataset: dataset,
             west: initial.west < bbox[0] ? initial.west : bbox[0],
             south: initial.south < bbox[1] ? initial.south : bbox[1],
