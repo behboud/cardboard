@@ -151,12 +151,12 @@ test('insert & update', function(t) {
     cardboard.put(fixtures.haitiLine, 'default', function(err, res) {
         t.equal(err, null);
         var primary = res.id, timestamp = res.timestamp;
+
         t.ok(primary, 'got id');
         t.pass('inserted');
         fixtures.haitiLine.id = primary;
         fixtures.haitiLine.geometry.coordinates[0][0] = -72.588671875;
 
-        var primary = res.id, timestamp = res.timestamp;
         cardboard.addFeatureIndexes(primary, 'default', timestamp, function(err) {
             t.ifError(err, 'indexed');
             dyno.query({
@@ -171,7 +171,7 @@ test('insert & update', function(t) {
         });
 
         function updateFeature(){
-            cardboard.put(fixtures.haitiLine, 'default', function(err, res) {
+            cardboard.put(fixtures.haitiLine, 'default', timestamp, function(err, res) {
                 t.equal(err, null);
                 var id = res.id, timestamp = res.timestamp;
                 t.equal(id, primary);
@@ -498,12 +498,12 @@ test('update feature that doesnt exist.', function(t) {
 
     fixtures.haiti.id = 'doesntexist';
 
-    cardboard.put(fixtures.haiti, 'default', failUpdate);
+    cardboard.put(fixtures.haiti, 'default', 12, failUpdate);
 
     function failUpdate(err, ids) {
         t.ok(err, 'should return an error');
         t.notOk(ids, 'should return an empty of ids');
-        t.equal(err.message, 'Update failed. Feature does not exist');
+        t.equal(err.code, 'ConditionalCheckFailedException');
         t.end();
     }
 });
@@ -954,7 +954,7 @@ test('insert idaho feature, update & check metadata', function(t) {
 
         var update = _.extend({ id: res.id }, edited);
         expectedSize = JSON.stringify(edited).length;
-        cardboard.put(update, dataset, updated);
+        cardboard.put(update, dataset, res.timestamp, updated);
     }
 
     function updated(err, res) {
@@ -1280,7 +1280,7 @@ test('idempotent insert: success with state change between inserts', function(t)
     cardboard.insert(feature, dataset, function(err, res) {
         t.ifError(err, 'inserted');
         feature.properties.newProp = 'bananas';
-        cardboard.update(feature, dataset, function(err) {
+        cardboard.update(feature, dataset, res.timestamp, function(err) {
             t.ifError(err, 'updated');
             checkDatabase(insertAgain);
         });
@@ -1316,6 +1316,497 @@ test('idempotent insert: success with state change between inserts', function(t)
     function insertAgain() {
         cardboard.insert(feature, dataset, function(err, res) {
             t.ifError(err, 'inserted again');
+            checkDatabase(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent update: no feature id fail', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var dataset = 'default';
+    var cardboard = new Cardboard(config);
+    var item, metadata, timestamp;
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ifError(err, 'inserted');
+        timestamp = res.timestamp;
+        firstUpdate();
+    });
+
+    function firstUpdate() {
+        delete feature.id;
+        cardboard.update(feature, dataset, timestamp, function(err) {
+            t.ok(err, 'expected error');
+            t.equal(err.message, 'Feature does not specify an id', 'expected message');
+            checkDatabase(updateAgain);
+        });
+    }
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 2, 'two records');
+
+            var thisItem = _.find(res.items, function(i) { 
+                return i.id.indexOf('id') === 0;
+            });
+            var thisMetadata = _.find(res.items, function(i) {
+                return i.id.indexOf('metadata') === 0;
+            });
+
+            if (item && metadata) {
+                t.deepEqual(thisMetadata, metadata, 'identical metadata');
+                var oldItem = _.omit(item, 'val');
+                var newItem = _.omit(thisItem, 'val');
+                t.deepEqual(newItem, oldItem, 'identical records');
+                if (item.val)
+                    t.ok(bufferEqual(item.val, thisItem.val), 'identical buffers');
+            } else {
+                item = thisItem;
+                metadata = thisMetadata;
+            }
+            callback();
+        });
+    }
+
+    function updateAgain() {
+        cardboard.update(feature, dataset, timestamp, function(err) {
+            t.ok(err, 'expected error');
+            t.equal(err.message, 'Feature does not specify an id', 'expected message');
+            checkDatabase(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent update: s3 fail', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var idaho = _.extend({id: 'null'}, geojsonFixtures.featurecollection.idaho.features.filter(function(f) {
+        return f.properties.GEOID === '16049960100';
+    })[0]);
+
+    var dataset = 'default';
+    var borkedS3 = {
+        putObject: function(params, callback) {
+            callback(new Error('I will never work'));
+        }
+    };
+    var cardboard = new Cardboard(_.defaults({ s3: borkedS3 }, config));
+    var item, metadata, timestamp;
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ifError(err, 'inserted');
+        timestamp = res.timestamp;
+        firstUpdate();
+    });
+
+    function firstUpdate() {
+        cardboard.update(idaho, dataset, timestamp, function(err) {
+            t.ok(err, 'expected error');
+            t.equal(err.message, 'I will never work', 'expected message');
+            checkDatabase(updateAgain);
+        });
+    }
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 2, 'two records');
+
+            var thisItem = _.find(res.items, function(i) { 
+                return i.id.indexOf('id') === 0;
+            });
+            var thisMetadata = _.find(res.items, function(i) {
+                return i.id.indexOf('metadata') === 0;
+            });
+
+            if (item && metadata) {
+                t.deepEqual(thisMetadata, metadata, 'identical metadata');
+                var oldItem = _.omit(item, 'val');
+                var newItem = _.omit(thisItem, 'val');
+                t.deepEqual(newItem, oldItem, 'identical records');
+                if (item.val)
+                    t.ok(bufferEqual(item.val, thisItem.val), 'identical buffers');
+            } else {
+                item = thisItem;
+                metadata = thisMetadata;
+            }
+            callback();
+        });
+    }
+
+    function updateAgain() {
+        cardboard.update(idaho, dataset, timestamp, function(err) {
+            t.ok(err, 'expected error');
+            t.equal(err.message, 'I will never work', 'expected message');
+            checkDatabase(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent update: dynamo fail', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var idaho = _.extend({id: 'null'}, geojsonFixtures.featurecollection.idaho.features.filter(function(f) {
+        return f.properties.GEOID === '16049960100';
+    })[0]);
+
+    var dataset = 'default';
+    var borkedDyno = {
+        updateItem: function(key, item, opts, callback) {
+            callback(new Error('I will never work'));
+        }
+    };
+    var borkedCardboard = new Cardboard(_.defaults({ dyno: borkedDyno }, config));
+    var cardboard = new Cardboard(config);
+    var item, metadata, timestamp;
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ifError(err, 'inserted');
+        timestamp = res.timestamp;
+        firstUpdate();
+    });
+
+    function firstUpdate() {
+        borkedCardboard.update(idaho, dataset, timestamp, function(err) {
+            t.ok(err, 'expectedError');
+            t.equal(err.message, 'I will never work', 'expected message');
+            checkDatabase(updateAgain);
+        });
+    }
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 2, 'two records');
+
+            var thisItem = _.find(res.items, function(i) { 
+                return i.id.indexOf('id') === 0;
+            });
+            var thisMetadata = _.find(res.items, function(i) {
+                return i.id.indexOf('metadata') === 0;
+            });
+
+            if (item && metadata) {
+                t.deepEqual(thisMetadata, metadata, 'identical metadata');
+                var oldItem = _.omit(item, 'val');
+                var newItem = _.omit(thisItem, 'val');
+                t.deepEqual(newItem, oldItem, 'identical records');
+                if (item.val)
+                    t.ok(bufferEqual(item.val, thisItem.val), 'identical buffers');
+            } else {
+                item = thisItem;
+                metadata = thisMetadata;
+            }
+            callback();
+        });
+    }
+
+    function updateAgain() {
+        borkedCardboard.update(idaho, dataset, timestamp, function(err) {
+            t.ok(err, 'expected error');
+            t.equal(err.message, 'I will never work', 'expected message');
+            checkDatabase(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent update: metadata defaultInfo fail', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var idaho = _.extend({id: 'null'}, geojsonFixtures.featurecollection.idaho.features.filter(function(f) {
+        return f.properties.GEOID === '16049960100';
+    })[0]);
+
+    var dataset = 'default';
+    var borkedMetadata = {
+        defaultInfo: function(callback) {
+            callback(new Error('I will never work'));
+        }
+    };
+    var borkedCardboard = new Cardboard(_.defaults({ metadata: borkedMetadata }, config));
+    var cardboard = new Cardboard(config);
+    var item, metadata, timestamp;
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ifError(err, 'inserted');
+        timestamp = res.timestamp;
+        firstUpdate();
+    });
+
+    function firstUpdate() {
+        borkedCardboard.update(idaho, dataset, timestamp, function(err) {
+            t.ok(err, 'expectedError');
+            t.equal(err.message, 'I will never work', 'expected message');
+            checkDatabase(updateAgain);
+        });
+    }
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 2, 'two records');
+
+            var thisItem = _.find(res.items, function(i) { 
+                return i.id.indexOf('id') === 0;
+            });
+            var thisMetadata = _.find(res.items, function(i) {
+                return i.id.indexOf('metadata') === 0;
+            });
+
+            if (item && metadata) {
+                t.deepEqual(thisMetadata, metadata, 'identical metadata');
+                var oldItem = _.omit(item, 'val');
+                var newItem = _.omit(thisItem, 'val');
+                t.deepEqual(newItem, oldItem, 'identical records');
+                if (item.val)
+                    t.ok(bufferEqual(item.val, thisItem.val), 'identical buffers');
+            } else {
+                item = thisItem;
+                metadata = thisMetadata;
+            }
+            callback();
+        });
+    }
+
+    function updateAgain() {
+        borkedCardboard.update(idaho, dataset, timestamp, function(err) {
+            t.ok(err, 'expected error');
+            // Second time around, timestamp is out of date because first update succeeded
+            t.equal(err.code, 'ConditionalCheckFailedException', 'expected message');
+            // but what's important is that the database does not change state the second time
+            checkDatabase(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent update: metadata adjustBounds fail', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var idaho = _.extend({id: 'null'}, geojsonFixtures.featurecollection.idaho.features.filter(function(f) {
+        return f.properties.GEOID === '16049960100';
+    })[0]);
+
+    var dataset = 'default';
+    var borkedMetadata = {
+        defaultInfo: Metadata(dyno, dataset).defaultInfo,
+        adjustBounds: function(bounds, callback) {
+            callback(new Error('I will never work'));
+        }
+    };
+    var borkedCardboard = new Cardboard(_.defaults({ metadata: borkedMetadata }, config));
+    var cardboard = new Cardboard(config);
+    var item, metadata, timestamp;
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ifError(err, 'inserted');
+        timestamp = res.timestamp;
+        firstUpdate();
+    });
+
+    function firstUpdate() {
+        borkedCardboard.update(idaho, dataset, timestamp, function(err) {
+            t.ok(err, 'expectedError');
+            t.equal(err.message, 'I will never work', 'expected message');
+            checkDatabase(updateAgain);
+        });
+    }
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 2, 'two records');
+
+            var thisItem = _.find(res.items, function(i) { 
+                return i.id.indexOf('id') === 0;
+            });
+            var thisMetadata = _.find(res.items, function(i) {
+                return i.id.indexOf('metadata') === 0;
+            });
+
+            if (item && metadata) {
+                t.deepEqual(thisMetadata, metadata, 'identical metadata');
+                var oldItem = _.omit(item, 'val');
+                var newItem = _.omit(thisItem, 'val');
+                t.deepEqual(newItem, oldItem, 'identical records');
+                if (item.val)
+                    t.ok(bufferEqual(item.val, thisItem.val), 'identical buffers');
+            } else {
+                item = thisItem;
+                metadata = thisMetadata;
+            }
+            callback();
+        });
+    }
+
+    function updateAgain() {
+        borkedCardboard.update(idaho, dataset, timestamp, function(err) {
+            t.ok(err, 'expected error');
+            // Second time around, timestamp is out of date because first update succeeded
+            t.equal(err.code, 'ConditionalCheckFailedException', 'expected message');
+            // but what's important is that the database does not change state the second time
+            checkDatabase(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent update: out-of-order update', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var idaho = _.extend({id: 'null'}, geojsonFixtures.featurecollection.idaho.features.filter(function(f) {
+        return f.properties.GEOID === '16049960100';
+    })[0]);
+
+    var dataset = 'default';
+    var cardboard = new Cardboard(config);
+    var item, metadata;
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ifError(err, 'inserted');
+        firstUpdate();
+    });
+
+    function firstUpdate() {
+        cardboard.update(idaho, dataset, 12, function(err) {
+            t.ok(err, 'expectedError');
+            t.equal(err.code, 'ConditionalCheckFailedException', 'expected message');
+            checkDatabase(updateAgain);
+        });
+    }
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 2, 'two records');
+
+            var thisItem = _.find(res.items, function(i) { 
+                return i.id.indexOf('id') === 0;
+            });
+            var thisMetadata = _.find(res.items, function(i) {
+                return i.id.indexOf('metadata') === 0;
+            });
+
+            if (item && metadata) {
+                t.deepEqual(thisMetadata, metadata, 'identical metadata');
+                var oldItem = _.omit(item, 'val');
+                var newItem = _.omit(thisItem, 'val');
+                t.deepEqual(newItem, oldItem, 'identical records');
+                if (item.val)
+                    t.ok(bufferEqual(item.val, thisItem.val), 'identical buffers');
+            } else {
+                item = thisItem;
+                metadata = thisMetadata;
+            }
+            callback();
+        });
+    }
+
+    function updateAgain() {
+        cardboard.update(idaho, dataset, 12, function(err) {
+            t.ok(err, 'expected error');
+            t.equal(err.code, 'ConditionalCheckFailedException', 'expected message');
+            checkDatabase(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent update: item does not exist', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var idaho = _.extend({id: 'null'}, geojsonFixtures.featurecollection.idaho.features.filter(function(f) {
+        return f.properties.GEOID === '16049960100';
+    })[0]);
+    var dataset = 'default';
+    var cardboard = new Cardboard(config);
+    var item, metadata;
+
+    cardboard.update(idaho, dataset, 12, function(err) {
+        t.ok(err, 'expected error');
+        t.equal(err.code, 'ConditionalCheckFailedException', 'expected message');
+        checkDatabase(updateAgain);
+    });
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 0, 'no records');
+            callback();
+        });
+    }
+
+    function updateAgain() {
+        cardboard.update(idaho, dataset, 12, function(err) {
+            t.ok(err, 'expected error');
+            t.equal(err.code, 'ConditionalCheckFailedException', 'expected message');
+            checkDatabase(t.end.bind(t));
+        });
+    }
+});
+teardown();
+
+setup();
+test('idempotent update: successful update', function(t) {
+    var feature = _.extend({id: 'null'}, fixtures.nullIsland);
+    var idaho = _.extend({id: 'null'}, geojsonFixtures.featurecollection.idaho.features.filter(function(f) {
+        return f.properties.GEOID === '16049960100';
+    })[0]);
+
+    var dataset = 'default';
+    var cardboard = new Cardboard(config);
+    var item, metadata, timestamp;
+
+    cardboard.insert(feature, dataset, function(err, res) {
+        t.ifError(err, 'inserted');
+        timestamp = res.timestamp;
+        firstUpdate();
+    });
+
+    function firstUpdate() {
+        cardboard.update(idaho, dataset, timestamp, function(err) {
+            t.ifError(err, 'updated')
+            checkDatabase(updateAgain);
+        });
+    }
+
+    function checkDatabase(callback) {
+        cardboard.dump(function(err, res) {
+            t.ifError(err, 'dumped');
+            t.equal(res.count, 2, 'two records');
+
+            var thisItem = _.find(res.items, function(i) { 
+                return i.id.indexOf('id') === 0;
+            });
+            var thisMetadata = _.find(res.items, function(i) {
+                return i.id.indexOf('metadata') === 0;
+            });
+
+            if (item && metadata) {
+                t.deepEqual(thisMetadata, metadata, 'identical metadata');
+                var oldItem = _.omit(item, 'val');
+                var newItem = _.omit(thisItem, 'val');
+                t.deepEqual(newItem, oldItem, 'identical records');
+                if (item.val)
+                    t.ok(bufferEqual(item.val, thisItem.val), 'identical buffers');
+            } else {
+                item = thisItem;
+                metadata = thisMetadata;
+            }
+            callback();
+        });
+    }
+
+    function updateAgain() {
+        cardboard.update(idaho, dataset, timestamp, function(err) {
+            t.ok(err, 'expected error');
+            t.equal(err.code, 'ConditionalCheckFailedException', 'expected message');
             checkDatabase(t.end.bind(t));
         });
     }

@@ -43,17 +43,22 @@ module.exports = function Cardboard(c) {
     // if feature.id is set, its an update, if the feature doesnt exist it will fail.
     // In the insert case this operation should not be retried. The caller is given
     // a primary key and advised to retry the insert via cardboard.insert
-    cardboard.put = function(feature, dataset, callback) {
+    cardboard.put = function(feature, dataset, timestamp, callback) {
+        if (typeof timestamp === 'function') {
+            callback = timestamp;
+            timestamp = null;
+        }
         var f = _.clone(feature);
         if (!f.id) {
             f.id = cuid();
-            cardboard.insert(f, dataset, function(err, res) {
+            return cardboard.insert(f, dataset, function(err, res) {
                 if (err) return callback(err, f.id);
                 callback(null, res);
             });
-        } else {
-            cardboard.update(f, dataset, callback);
         }
+
+        if (!timestamp) callback(new Error('No timestamp provided for update'));
+        else cardboard.update(f, dataset, timestamp, callback);
     };
 
     // Retryable insert operation. Does not update indexes.
@@ -109,15 +114,16 @@ module.exports = function Cardboard(c) {
     // Retryable update operation. Does not update indexes.
     // - feature: GeoJSON object with a specified feature.id
     // - dataset: the name of the cardboard dataset
+    // - timestamp: the timestamp of the feature before this update is performed
     // - callback: if an error is encountered, and the second argument passed to
     //     callback is truthy, then the caller is advised to retry the request. 
     //     If the second argument is falsey then the caller is advised not to retry
     //     the request. Usually this means that the request will always fail.
-    cardboard.update = function(feature, dataset, callback) {
+    cardboard.update = function(feature, dataset, timestamp, callback) {
         if (!feature.id) return callback(new Error('Feature does not specify an id'));
 
         var metadata = c.metadata ? c.metadata : Metadata(dyno, dataset),
-            timestamp = (+new Date()),
+            newTimestamp = (+new Date()),
             primary = feature.id,
             s3Key = [prefix, dataset, primary, timestamp].join('/'),
             buf = geobuf.featureToGeobuf(feature).toBuffer(),
@@ -128,7 +134,7 @@ module.exports = function Cardboard(c) {
             query = { dataset: { EQ: dataset }, id: { EQ: key.id } };
 
         var item = { put: {}, delete: {} };
-        item.put.timestamp = timestamp;
+        item.put.timestamp = newTimestamp;
         if (useS3) {
             item.put.geometryid = s3Key;
             item.delete.val = '';
@@ -136,32 +142,24 @@ module.exports = function Cardboard(c) {
             item.delete.geometryid = '';
             item.put.val = buf;
         }
-            
-        dyno.getItem(key, function(err, original) {
+
+        var condition = { expected: {} };
+        condition.expected.id = { ComparisonOperator: 'NOT_NULL' };
+        condition.expected.timestamp = {
+            ComparisonOperator: 'EQ',
+            AttributeValueList: [ { N: timestamp.toString() } ]
+        };
+
+        var q = queue(1);
+        if (useS3) q.defer(s3.putObject.bind(s3), s3Params);
+        q.defer(dyno.updateItem, key, item, condition);
+        q.defer(metadata.defaultInfo);
+        q.defer(metadata.adjustBounds, bounds);
+        q.awaitAll(function(err, res) {
+            // advise not to retry if you're trying to update out-of-order or feature does not exist
+            if (err && err.code === 'ConditionalCheckFailedException') return callback(err, false);
             if (err) return callback(err, true);
-
-            // advise not to retry, feature does not exist to be updated
-            if (!original.Item) 
-                return callback(new Error('Update failed. Feature does not exist'), false);
-
-            var updatedItem;
-            var condition = { expected: {} };
-            condition.expected.timestamp = { 
-                ComparisonOperator: 'EQ',
-                AttributeValueList: [ { N: original.Item.timestamp.toString() } ]
-            };
-
-            var q = queue(1);
-            if (useS3) q.defer(s3.putObject.bind(s3), s3Params);
-            q.defer(dyno.updateItem, key, item, condition);
-            q.defer(metadata.defaultInfo);
-            q.defer(metadata.adjustBounds, bounds);
-            q.awaitAll(function(err, res) {
-                // advise not to retry if you're trying to update out-of-order
-                if (err && err.code === 'ConditionalCheckFailedException') return callback(err, false);
-                if (err) return callback(err, true);
-                callback(null, { id: primary, timestamp: timestamp });
-            });
+            callback(null, { id: primary, timestamp: timestamp });
         });
     };
 
