@@ -383,7 +383,7 @@ module.exports = function Cardboard(c) {
         // Get geobuf from S3
         var uri = url.parse(item.s3url);
         s3.getObject({
-            Bucket: uri.host,
+            Bucket: bucket,
             Key: uri.pathname.substr(1)
         }, function(err, data) {
             if (err) return callback(err);
