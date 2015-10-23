@@ -384,6 +384,70 @@ function Cardboard(config) {
         });
     };
 
+    cardboard.list = function(dataset, pageOptions, queryOptions, callback) {
+        var opts = {};
+
+        if (typeof pageOptions === 'function') {
+            callback = pageOptions;
+            opts.pages = 0;
+            pageOptions = {};
+        }
+
+        pageOptions = pageOptions || {};
+        if (pageOptions.start) opts.start = {
+            dataset: dataset,
+            id: 'id!' + pageOptions.start
+        };
+        if (pageOptions.maxFeatures) opts.limit = pageOptions.maxFeatures;
+
+        var query = { dataset: { EQ: dataset }, id: { BEGINS_WITH: 'id!' } };
+        opts.filter = queryOptions;
+        if (!callback) {
+            var resolver = new stream.Transform({ objectMode: true, highWaterMark: 50 });
+
+            resolver.items = [];
+
+            resolver._resolve = function(callback) {
+                utils.resolveFeatures(resolver.items, function(err, collection) {
+                    if (err) return callback(err);
+
+                    resolver.items = [];
+
+                    collection.features.forEach(function(feature) {
+                        resolver.push(feature);
+                    });
+
+                    callback();
+                });
+            };
+
+            resolver._transform = function(item, enc, callback) {
+                resolver.items.push(item);
+                if (resolver.items.length < 25) return callback();
+
+                resolver._resolve(callback);
+            };
+
+            resolver._flush = function(callback) {
+                if (!resolver.items.length) return callback();
+
+                resolver._resolve(callback);
+            };
+
+            return config.dyno.query(query)
+                .on('error', function(err) { resolver.emit('error', err); })
+              .pipe(resolver);
+        }
+
+        config.dyno.query(query, opts, function(err, items) {
+            if (err) return callback(err);
+            utils.resolveFeatures(items, function(err, features) {
+                if (err) return callback(err);
+                callback(null, features);
+            });
+        });
+    };
+
     /**
      * List datasets available in this database
      * @param {function} callback - the callback function to handle the response
