@@ -7,6 +7,7 @@ var AWS = require('aws-sdk');
 var tilebelt = require('tilebelt');
 var geobuf = require('geobuf');
 var stream = require('stream');
+var Pbf = require('pbf');
 
 var MAX_GEOMETRY_SIZE = 1024 * 10;  // 10KB
 
@@ -123,7 +124,7 @@ function Cardboard(config) {
         if (encoded[1]) q.defer(config.s3.putObject.bind(config.s3), encoded[1]);
         q.defer(config.dyno.putItem, encoded[0]);
         q.await(function(err) {
-            var result = geobuf.geobufToFeature(encoded[0].val || encoded[1].Body);
+            var result = geobuf.decode(new Pbf(encoded[0].val || encoded[1].Body));
             result.id = utils.idFromRecord(encoded[0]);
             callback(err, result);
         });
@@ -320,69 +321,6 @@ function Cardboard(config) {
      *   });
      * })();
      */
-    cardboard.list = function(dataset, pageOptions, callback) {
-        var opts = {};
-
-        if (typeof pageOptions === 'function') {
-            callback = pageOptions;
-            opts.pages = 0;
-            pageOptions = {};
-        }
-
-        pageOptions = pageOptions || {};
-        if (pageOptions.start) opts.start = {
-            dataset: dataset,
-            id: 'id!' + pageOptions.start
-        };
-        if (pageOptions.maxFeatures) opts.limit = pageOptions.maxFeatures;
-
-        var query = { dataset: { EQ: dataset }, id: { BEGINS_WITH: 'id!' } };
-
-        if (!callback) {
-            var resolver = new stream.Transform({ objectMode: true, highWaterMark: 50 });
-
-            resolver.items = [];
-
-            resolver._resolve = function(callback) {
-                utils.resolveFeatures(resolver.items, function(err, collection) {
-                    if (err) return callback(err);
-
-                    resolver.items = [];
-
-                    collection.features.forEach(function(feature) {
-                        resolver.push(feature);
-                    });
-
-                    callback();
-                });
-            };
-
-            resolver._transform = function(item, enc, callback) {
-                resolver.items.push(item);
-                if (resolver.items.length < 25) return callback();
-
-                resolver._resolve(callback);
-            };
-
-            resolver._flush = function(callback) {
-                if (!resolver.items.length) return callback();
-
-                resolver._resolve(callback);
-            };
-
-            return config.dyno.query(query)
-                .on('error', function(err) { resolver.emit('error', err); })
-              .pipe(resolver);
-        }
-
-        config.dyno.query(query, opts, function(err, items) {
-            if (err) return callback(err);
-            utils.resolveFeatures(items, function(err, features) {
-                if (err) return callback(err);
-                callback(null, features);
-            });
-        });
-    };
 
     cardboard.list = function(dataset, pageOptions, queryOptions, callback) {
         var opts = {};
@@ -392,8 +330,13 @@ function Cardboard(config) {
             opts.pages = 0;
             pageOptions = {};
         }
+        if (typeof queryOptions === 'function') {
+            callback = queryOptions;
+            queryOptions = {};
+        }
 
         pageOptions = pageOptions || {};
+        queryOptions = queryOptions || {};
         if (pageOptions.start) opts.start = {
             dataset: dataset,
             id: 'id!' + pageOptions.start
